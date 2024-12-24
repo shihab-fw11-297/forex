@@ -10,7 +10,7 @@ const axios = require("axios");
 class ApiService {
   constructor() {
     this.baseUrl = "https://fcsapi.com/api-v3/forex/history";
-    this.accessKey = process.env.FCS_API_KEY || "hS5nvs9txJYdUktGs1h60fIh1";
+    this.accessKey = process.env.FCS_API_KEY || "kPInDDGvXm1ItuBioWX7pB";
   }
 
   async getForexData(pair, resolution) {
