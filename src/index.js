@@ -1,12 +1,10 @@
 const axios = require("axios");
 const technicalIndicators = require("technicalindicators");
-const fs = require("fs/promises");
 const moment = require("moment");
 
 // Constants
-const FINAGE_API_KEY = "API_KEYf7BXPN4LJOH0A56FSU4BWLI2DZDC5CGD";
 const BASE_URL = "https://api.finage.co.uk";
-const TIMEFRAMES = ["1m", "2m","5m", '1h','2h','4h','1D'];
+const TIMEFRAMES = ["5m","15m", '1h','2h','4h','1D'];
 const api = ["API_KEY20P3QCQOJ6CE8M5BS04LLHOF6SGMTKBR","API_KEYf7BXPN4LJOH0A56FSU4BWLI2DZDC5CGD","API_KEY22YYXQN80WL5H4K3IIF82W5WVAKFR746"]
 
 // Cache for storing fetched data
@@ -19,7 +17,7 @@ function getRandomApiKey() {
 }
 
 async function fetchHistoricalData(symbol, timeframe, limit = 100) {
-  const timeframesMap = {
+  const timeframeConfig = {
     "1m": { unit: "minute", daysBack: 5, limits: 20000, time: 1 },
     "2m": { unit: "minute", daysBack: 15, limits: 20000, time: 2 },
     "4m": { unit: "minute", daysBack: 25, limits: 20000, time: 4 },
@@ -30,150 +28,67 @@ async function fetchHistoricalData(symbol, timeframe, limit = 100) {
     "2h": { unit: "hour", daysBack: 80, limits: 10000, time: 2 },
     "4h": { unit: "hour", daysBack: 80, limits: 5000, time: 4 },
     "1D": { unit: "day", daysBack: 90, limits: 5000, time: 1 },
-  };
-
-  const config = timeframesMap[timeframe];
-  if (!config) throw new Error(`Unsupported timeframe: ${timeframe}`);
-
+  }[timeframe];
+  
+  if (!timeframeConfig) throw new Error(`Unsupported timeframe: ${timeframe}`);
+  
   const cacheKey = `${symbol}-${timeframe}`;
-  const cacheEntry = cache[cacheKey];
-
-  if (cacheEntry && Date.now() - cacheEntry.timestamp < 60 * 60 * 1000) {
+  if (cache[cacheKey]?.timestamp > Date.now() - 3600000) {
     console.log(`Cache hit for ${symbol} (${timeframe})`);
-    return cacheEntry.data;
+    return cache[cacheKey].data;
   }
-
-  console.log(`Cache miss or expired for ${symbol} (${timeframe}). Fetching from API...`);
-
+  
+ 
+  
   const today = new Date();
-  const startDateObj = new Date(today);
-  startDateObj.setDate(today.getDate() - config.daysBack);
-  const endDateObj = new Date(today);
-  endDateObj.setDate(today.getDate() + 2);
-
-  const formatDate = (date) => date.toISOString().split("T")[0];
-  const startDate = formatDate(startDateObj);
-  const endDate = formatDate(endDateObj);
-
-  const selectedApiKey = getRandomApiKey();
-  const url = `${BASE_URL}/agg/forex/${symbol.toLowerCase()}/${config.time}/${config.unit}/${startDate}/${endDate}?apikey=${selectedApiKey}&limit=${config.limits}`;
-
+  const startDate = new Date(today.setDate(today.getDate() - timeframeConfig.daysBack)).toISOString().split("T")[0];
+  const endDate = new Date(new Date().setDate(new Date().getDate() + 2)).toISOString().split("T")[0];
+  
   try {
-    console.log("Fetching data from URL:", url);
+    const url = `${BASE_URL}/agg/forex/${symbol.toLowerCase()}/${timeframeConfig.time}/${timeframeConfig.unit}/${startDate}/${endDate}?apikey=${getRandomApiKey()}&limit=${timeframeConfig.limits}`;
+    console.log(`url---->`,url);
     const { data } = await axios.get(url);
-
-    const formattedData = data.results.map(({ t, o, h, l, c, v }) => ({
-      timestamp: t,
-      open: o,
-      high: h,
-      low: l,
-      close: c,
-      volume: v,
+    
+    const formattedData = data.results.map(({ t, o, h, l, c, v }) => ({ 
+      timestamp: t, open: o, high: h, low: l, close: c, volume: v 
     }));
-
-    cache[cacheKey] = {
-      data: formattedData,
-      timestamp: Date.now(),
-    };
-
+    
+    cache[cacheKey] = { data: formattedData, timestamp: Date.now() };
     return formattedData;
   } catch (err) {
-    console.error(`Error fetching data for ${symbol} (${timeframe}): ${err.message}`);
+    console.error(`Error fetching ${symbol} (${timeframe}): ${err.message}`);
     return [];
-  }
-}
-
-
-function getCurrentSession() {
-  const hour = moment().utc().hour();
-
-  if (hour >= 22 || hour < 7) {
-    return "asian";
-  } else if (hour >= 7 && hour < 12) {
-    return "european";
-  } else if (hour >= 16 && hour < 21) {
-    return "us";
-  } else if (hour >= 12 && hour < 16) {
-    return "overlap"; // London-NY overlap
-  } else {
-    return "transition"; // Session transition period
   }
 }
 
 function calculateIndicators(data) {
   try {
-    const closes = data.map((candle) => candle.close);
-    const highs = data.map((candle) => candle.high);
-    const lows = data.map((candle) => candle.low);
-    const volumes = data.map((candle) => candle.volume);
-
-    const sma20 = technicalIndicators.SMA.calculate({
-      period: 20,
-      values: closes,
-    });
-    const sma50 = technicalIndicators.SMA.calculate({
-      period: 50,
-      values: closes,
-    });
-    const sma200 = technicalIndicators.SMA.calculate({
-      period: 200,
-      values: closes,
-    });
-
-    const ema10 = technicalIndicators.EMA.calculate({
-      period: 10,
-      values: closes,
-    });
-    const ema21 = technicalIndicators.EMA.calculate({
-      period: 21,
-      values: closes,
-    });
-
-    const macd = technicalIndicators.MACD.calculate({
-      fastPeriod: 12,
-      slowPeriod: 26,
-      signalPeriod: 9,
-      values: closes,
-    });
-
-    const rsi14 = technicalIndicators.RSI.calculate({
-      period: 14,
-      values: closes,
-    });
-    const rsi5 = technicalIndicators.RSI.calculate({
-      period: 5,
-      values: closes,
-    });
-    const bb = technicalIndicators.BollingerBands.calculate({
-      period: 20,
-      stdDev: 2,
-      values: closes,
-    });
-
-    const adx = technicalIndicators.ADX.calculate({
-      high: highs,
-      low: lows,
-      close: closes,
-      period: 14,
-    });
-
-    const atr = technicalIndicators.ATR.calculate({
-      high: highs,
-      low: lows,
-      close: closes,
-      period: 14,
-    });
-
+    const closes = data.map(c => c.close);
+    const highs = data.map(c => c.high);
+    const lows = data.map(c => c.low);
+    
     return {
-      sma: { sma20, sma50, sma200 },
-      ema: { ema10, ema21 },
-      macd,
-      rsi: { rsi14, rsi5 },
-      bb,
-      adx,
-      atr,
+      sma: {
+        sma20: technicalIndicators.SMA.calculate({ period: 20, values: closes }),
+        sma50: technicalIndicators.SMA.calculate({ period: 50, values: closes }),
+        sma200: technicalIndicators.SMA.calculate({ period: 200, values: closes })
+      },
+      ema: {
+        ema10: technicalIndicators.EMA.calculate({ period: 10, values: closes }),
+        ema21: technicalIndicators.EMA.calculate({ period: 21, values: closes })
+      },
+      macd: technicalIndicators.MACD.calculate({
+        fastPeriod: 12, slowPeriod: 26, signalPeriod: 9, values: closes
+      }),
+      rsi: {
+        rsi14: technicalIndicators.RSI.calculate({ period: 14, values: closes }),
+        rsi5: technicalIndicators.RSI.calculate({ period: 5, values: closes })
+      },
+      bb: technicalIndicators.BollingerBands.calculate({ period: 20, stdDev: 2, values: closes }),
+      adx: technicalIndicators.ADX.calculate({ high: highs, low: lows, close: closes, period: 14 }),
+      atr: technicalIndicators.ATR.calculate({ high: highs, low: lows, close: closes, period: 14 }),
       lastClose: closes[closes.length - 1],
-      lastCandle: data[data.length - 1],
+      lastCandle: data[data.length - 1]
     };
   } catch (err) {
     console.log("error", err);
@@ -973,39 +888,6 @@ function calculateRSI(prices, period) {
   return result;
 }
 
-function calculateVolatilityMetrics(data) {
-  const atr = technicalIndicators.ATR.calculate({
-    high: data.map((c) => c.high),
-    low: data.map((c) => c.low),
-    close: data.map((c) => c.close),
-    period: 14,
-  });
-
-  const currentATR = atr[atr.length - 1];
-  const lastClose = data[data.length - 1].close;
-  const atrPercentage = (currentATR / lastClose) * 100;
-  const bb = technicalIndicators.BollingerBands.calculate({
-    period: 20,
-    stdDev: 2,
-    values: data.map((c) => c.close),
-  });
-
-  const currentBB = bb[bb.length - 1];
-  const bandWidth = (currentBB.upper - currentBB.lower) / currentBB.middle;
-  const bandWidths = bb.slice(-20).map((b) => (b.upper - b.lower) / b.middle);
-  const avgBandWidth =
-    bandWidths.reduce((sum, width) => sum + width, 0) / bandWidths.length;
-  const volatilitySqueeze = bandWidth < avgBandWidth * 0.8;
-
-  return {
-    atr: currentATR,
-    atrPercentage,
-    bandWidth,
-    avgBandWidth,
-    volatilitySqueeze,
-  };
-}
-
 function analyzeTradingOpportunity(
   indicators,
   patterns,
@@ -1013,79 +895,131 @@ function analyzeTradingOpportunity(
   timeframe
 ) {
   const { sma, ema, macd, rsi, adx, lastClose } = indicators;
-  const lastMACD = macd[macd.length - 1];
-  const lastRSI14 = rsi.rsi14[rsi.rsi14.length - 1];
-  const lastEMA10 = ema.ema10[ema.ema10.length - 1];
-  const lastEMA21 = ema.ema21[ema.ema21.length - 1];
-  const lastSMA20 = sma.sma20[sma.sma20.length - 1];
-  const lastSMA50 = sma.sma50[sma.sma50.length - 1];
-  const lastSMA200 = sma.sma200[sma.sma200.length - 1];
-  const lastADX = adx[adx.length - 1];
-
-  const maAlignment = lastEMA10 > lastEMA21 && lastClose > lastSMA50;
-  const trendDirection = maAlignment ? "bullish" : "bearish";
-  const trendStrength =
-    lastADX.adx > 25 ? "strong" : lastADX.adx > 20 ? "moderate" : "weak";
-  const macdCrossover =
-    macd[macd.length - 2]?.MACD < macd[macd.length - 2]?.signal &&
-    lastMACD.MACD > lastMACD.signal;
-
-  const macdCrossunder =
-    macd[macd.length - 2]?.MACD > macd[macd.length - 2]?.signal &&
-    lastMACD.MACD < lastMACD.signal;
-
-  const momentum = {
-    bullish: macdCrossover || (lastRSI14 > 50 && lastRSI14 < 70),
-    bearish: macdCrossunder || (lastRSI14 < 50 && lastRSI14 > 30),
+  
+  // Extract latest values
+  const [prevMACD, lastMACD] = macd.slice(-2);
+  const lastRSI = rsi.rsi14.slice(-1)[0];
+  const lastADX = adx.slice(-1)[0];
+  const emaValues = {
+    ema10: ema.ema10.slice(-1)[0],
+    ema21: ema.ema21.slice(-1)[0]
+  };
+  const smaValues = {
+    sma20: sma.sma20.slice(-1)[0],
+    sma50: sma.sma50.slice(-1)[0],
+    sma200: sma.sma200.slice(-1)[0]
   };
 
-  const bullishSignals = [
-    maAlignment,
-    macdCrossover,
-    patterns.doubleBottom,
-    patterns.momentumBurst.bullish,
-    lastRSI14 < 40,
-  ].filter(Boolean).length;
+  // Trend Analysis
+  const trendHierarchy = {
+    primary: lastClose > smaValues.sma200,
+    intermediate: emaValues.ema10 > emaValues.ema21,
+    shortTerm: lastClose > smaValues.sma50
+  };
+  
+  const adxTrend = {
+    strength: lastADX.adx > 25 ? "strong" : lastADX.adx > 20 ? "moderate" : "weak",
+    direction: lastADX.plusDI > lastADX.minusDI ? "bullish" : "bearish"
+  };
 
-  const bearishSignals = [
-    !maAlignment,
-    macdCrossunder,
-    patterns.doubleTop,
-    patterns.momentumBurst.bearish,
-    lastRSI14 > 60,
-  ].filter(Boolean).length;
+  // Momentum Signals
+  const momentumIndicators = {
+    macdCrossover: prevMACD.MACD < prevMACD.signal && lastMACD.MACD > lastMACD.signal,
+    macdCrossunder: prevMACD.MACD > prevMACD.signal && lastMACD.MACD < lastMACD.signal,
+    rsiSignal: {
+      level: lastRSI,
+      bullish: lastRSI < 45 && lastRSI > 30,
+      bearish: lastRSI > 55 && lastRSI < 70
+    }
+  };
 
-  const session = getCurrentSession();
-  const sessionMultiplier =
-    session === "overlap" ? 1.2 : session === "asian" ? 0.8 : 1;
+  // Pattern Recognition
+  const patternWeight = {
+    bullish: patterns.doubleBottom ? 1.2 : patterns.bullFlag ? 1.1 : 1,
+    bearish: patterns.doubleTop ? 1.2 : patterns.headAndShoulders ? 1.1 : 1
+  };
 
-  const bullScore = (bullishSignals / 5) * sessionMultiplier;
-  const bearScore = (bearishSignals / 5) * sessionMultiplier;
+  // Volatility Adjustment
+  const volatilityMultipliers = {
+    squeeze: 0.6,
+    high: 1.2,
+    normal: 1
+  };
 
-  const recommendedPositionSize = volatility.volatilitySqueeze
-    ? 0.5
-    : volatility.atrPercentage > 1
-    ? 0.75
-    : 1;
+  // Scoring System
+  let bullishScore = 0;
+  let bearishScore = 0;
 
-  const stopLossPips = Math.ceil(volatility.atr * 100);
-  const targetPips = Math.ceil(stopLossPips * 1.5);
+  // Trend Scoring
+  bullishScore += trendHierarchy.primary ? 2 : 0;
+  bearishScore += trendHierarchy.primary ? 0 : 2;
+  bullishScore += trendHierarchy.intermediate ? 1.5 : 0;
+  bearishScore += trendHierarchy.intermediate ? 0 : 1.5;
+  
+  // Momentum Scoring
+  bullishScore += momentumIndicators.macdCrossover ? 1.5 : 0;
+  bearishScore += momentumIndicators.macdCrossunder ? 1.5 : 0;
+  bullishScore += momentumIndicators.rsiSignal.bullish ? 1 : 0;
+  bearishScore += momentumIndicators.rsiSignal.bearish ? 1 : 0;
+  
+  // Pattern Scoring
+  bullishScore *= patternWeight.bullish;
+  bearishScore *= patternWeight.bearish;
+
+  // Volatility Adjustment
+  const volatilityFactor = volatility.volatilitySqueeze 
+    ? volatilityMultipliers.squeeze 
+    : volatility.atrPercentage > 1 
+      ? volatilityMultipliers.high 
+      : volatilityMultipliers.normal;
+
+  // Final Direction Determination
+  const confidenceLevel = Math.abs(bullishScore - bearishScore) / (bullishScore + bearishScore);
+  let finalDirection = "neutral";
+  
+  if (Math.max(bullishScore, bearishScore) > 3) {
+    finalDirection = bullishScore > bearishScore ? "bullish" : "bearish";
+  }
+
+  console.log("bullishScore, bearishScore",bullishScore, bearishScore);
+  // Risk Management
+  const positionSize = {
+    base: volatility.volatilitySqueeze ? 0.5 : 1,
+    adjusted: parseFloat((volatilityFactor * (confidenceLevel > 0.4 ? 1.2 : 1)).toFixed(2))
+  };
+
+  const stopLoss = Math.ceil(volatility.atr * (finalDirection !== "neutral" ? 1.5 : 2));
+  const takeProfit = Math.ceil(stopLoss * (adxTrend.strength === "strong" ? 2 : 1.5));
 
   return {
     timeframe,
-    trendDirection,
-    trendStrength,
-    momentum,
-    bullScore,
-    bearScore,
-    recommendedPositionSize,
-    stopLossPips,
-    targetPips,
-    volatilityCondition: volatility.volatilitySqueeze ? "Squeeze" : "Normal",
-    recommendation:
-      bullScore > 0.6 ? "BUY" : bearScore > 0.6 ? "SELL" : "NEUTRAL",
+    trendAnalysis: {
+      direction: finalDirection,
+      strength: adxTrend.strength,
+      confidence: `${Math.round(confidenceLevel * 100)}%`
+    },
+    keyLevels: {
+      support: smaValues.sma50,
+      resistance: smaValues.sma200
+    },
+    riskParameters: {
+      positionSize: positionSize.adjusted,
+      stopLoss,
+      takeProfit,
+      rewardRiskRatio: (takeProfit/stopLoss).toFixed(1)
+    },
+    marketCondition: {
+      volatility: volatility.volatilitySqueeze ? "squeeze" : "normal",
+      momentum: momentumIndicators.rsiSignal.level > 60 ? "overbought" 
+               : momentumIndicators.rsiSignal.level < 40 ? "oversold" 
+               : "neutral"
+    },
+    confirmationSignal: finalDirection === "bullish" 
+      ? "Look for close above EMA21 with increasing volume"
+      : "Watch for breakdown below SMA50 with MACD crossunder"
   };
 }
+
 
 function checkTimeframeAlignment(analysis) {
   const directions = Object.values(analysis).map((a) => a.trendDirection);
@@ -1133,21 +1067,22 @@ async function enhancedMarketAnalysis(symbol) {
       timeframe
     );
 
-    if (["1m", "2m", "4m", "5m", "15m", "30m"].includes(timeframe)) {
-      const dayTradingAnalysis = analyzeForDayTrading(
-        data,
-        indicators,
-        patterns,
-        advancedPatterns,
-        volatility,
-        volumeIndicators,
-        pivotPoints,
-        fibLevels.shortTerm
-      );
-      if (dayTradingAnalysis.tradingOpportunity) {
-        dayTradingOpportunities.push({ timeframe, ...dayTradingAnalysis });
-      }
-    }
+    // if (["1m", "2m", "4m", "5m"].includes(timeframe)) {
+    //   const shortTermAnalysis = analyzeForShortTerm(
+    //     data,
+    //     indicators,
+    //     patterns,
+    //     advancedPatterns,
+    //     volatility,
+    //     volumeIndicators,
+    //     pivotPoints,
+    //     fibLevels.shortTerm
+    //   );
+      
+    //   if (shortTermAnalysis.tradingOpportunity) {
+    //     shortTermOpportunities.push({ timeframe, ...shortTermAnalysis });
+    //   }
+    // }
 
     if (["1h", "2h", "4h"].includes(timeframe)) {
       const midTermAnalysis = analyzeForMidTerm(
@@ -1171,144 +1106,7 @@ async function enhancedMarketAnalysis(symbol) {
     multiTimeframeAligned: mtfAligned,
     dayTradingOpportunities,
     midTermOutlook,
-    pivotPoints,
-    overallRecommendation: enhancedOverallRecommendation(
-      timeframeAnalysis,
-      mtfAligned,
-      dayTradingOpportunities,
-      midTermOutlook
-    ),
-  };
-}
-
-function enhancedOverallRecommendation(
-  timeframeAnalysis,
-  mtfAligned,
-  dayTradingOpportunities,
-  midTermOutlook
-) {
-  const strongAlignment = mtfAligned.strength > 0.7;
-  const hasDayTradingOpportunity = dayTradingOpportunities.length > 0;
-  const hasMidTermOpportunity = Object.values(midTermOutlook).some(
-    (analysis) => analysis.tradingOpportunity
-  );
-
-  let bestMidTermTimeframe = null;
-  let bestMidTermConfidence = 0;
-
-  for (const [timeframe, analysis] of Object.entries(midTermOutlook)) {
-    if (analysis.tradingOpportunity && analysis.confidence === "high") {
-      bestMidTermTimeframe = timeframe;
-      bestMidTermConfidence = "high";
-      break;
-    } else if (
-      analysis.tradingOpportunity &&
-      analysis.confidence === "moderate" &&
-      bestMidTermConfidence !== "high"
-    ) {
-      bestMidTermTimeframe = timeframe;
-      bestMidTermConfidence = "moderate";
-    }
-  }
-
-  let bestDayTradingOpportunity = null;
-
-  if (hasDayTradingOpportunity) {
-    bestDayTradingOpportunity = dayTradingOpportunities.reduce(
-      (best, current) => {
-        if (!best) return current;
-        return current.riskRewardRatio > best.riskRewardRatio ? current : best;
-      },
-      null
-    );
-  }
-
-  const recommendation = {
-    shortTerm: {
-      action: hasDayTradingOpportunity
-        ? bestDayTradingOpportunity.direction
-        : "wait",
-      confidence: hasDayTradingOpportunity
-        ? bestDayTradingOpportunity.confidence
-        : "low",
-      timeframe: hasDayTradingOpportunity
-        ? bestDayTradingOpportunity.timeframe
-        : null,
-      entry: hasDayTradingOpportunity ? bestDayTradingOpportunity.entry : null,
-      stopLoss: hasDayTradingOpportunity
-        ? bestDayTradingOpportunity.stopLoss
-        : null,
-      target: hasDayTradingOpportunity
-        ? bestDayTradingOpportunity.target
-        : null,
-      riskRewardRatio: hasDayTradingOpportunity
-        ? bestDayTradingOpportunity.riskRewardRatio
-        : null,
-    },
-    midTerm: {
-      action: hasMidTermOpportunity
-        ? midTermOutlook[bestMidTermTimeframe].direction
-        : "wait",
-      confidence: hasMidTermOpportunity
-        ? midTermOutlook[bestMidTermTimeframe].confidence
-        : "low",
-      timeframe: bestMidTermTimeframe,
-      entry: hasMidTermOpportunity
-        ? midTermOutlook[bestMidTermTimeframe].entry
-        : null,
-      stopLoss: hasMidTermOpportunity
-        ? midTermOutlook[bestMidTermTimeframe].stopLoss
-        : null,
-      target: hasMidTermOpportunity
-        ? midTermOutlook[bestMidTermTimeframe].target
-        : null,
-      riskRewardRatio: hasMidTermOpportunity
-        ? midTermOutlook[bestMidTermTimeframe].riskRewardRatio
-        : null,
-    },
-  };
-
-  const dayTradingDirection = hasDayTradingOpportunity
-    ? bestDayTradingOpportunity.direction
-    : "neutral";
-  const midTermDirection = hasMidTermOpportunity
-    ? midTermOutlook[bestMidTermTimeframe].direction
-    : "neutral";
-
-  let overallSentiment;
-
-  if (
-    dayTradingDirection === midTermDirection &&
-    dayTradingDirection !== "neutral"
-  ) {
-    overallSentiment = dayTradingDirection;
-  } else if (strongAlignment) {
-    overallSentiment = mtfAligned.direction;
-  } else if (hasMidTermOpportunity) {
-    overallSentiment = midTermDirection;
-  } else if (hasDayTradingOpportunity) {
-    overallSentiment = dayTradingDirection;
-  } else {
-    overallSentiment = "neutral";
-  }
-
-  const marketConditions = {
-    volatility: Object.values(timeframeAnalysis).some(
-      (analysis) => analysis.volatility === "high"
-    )
-      ? "high"
-      : "normal",
-    trend: strongAlignment ? "strong" : "mixed",
-    recommendation: overallSentiment,
-  };
-
-  return {
-    sentiment: overallSentiment,
-    marketConditions,
-    shortTerm: recommendation.shortTerm,
-    midTerm: recommendation.midTerm,
-    timeframeAlignment: strongAlignment ? "strong" : "weak",
-    confidence: strongAlignment ? "high" : "moderate",
+    pivotPoints
   };
 }
 
@@ -1545,199 +1343,9 @@ async function comprehensiveTradingAnalysis(symbol, sectorSymbols = []) {
     timestamp: new Date().toISOString(),
     technicalAnalysis: analysisResults,
     marketBreadth,
-    summary: createAnalysisSummary(analysisResults, marketBreadth),
   };
 }
 
-function createAnalysisSummary(analysisResults, marketBreadth) {
-  const {
-    overallRecommendation,
-    dayTradingOpportunities,
-    midTermOutlook,
-    symbol,
-  } = analysisResults;
-  let summaryText = `Analysis for ${symbol}: `;
-  summaryText += `The overall sentiment is ${overallRecommendation.sentiment}. `;
-  if (dayTradingOpportunities.length > 0) {
-    const bestOpportunity = dayTradingOpportunities[0];
-    summaryText += `For day trading, a ${bestOpportunity.direction} opportunity was identified on the ${bestOpportunity.timeframe} timeframe with ${bestOpportunity.confidence} confidence. `;
-
-    if (bestOpportunity.patterns) {
-      const patternNames = Object.entries(bestOpportunity.patterns)
-        .filter(
-          ([key, value]) =>
-            (typeof value === "boolean" && value === true) ||
-            (typeof value === "object" && value.found === true)
-        )
-        .map(([key]) => key);
-
-      if (patternNames.length > 0) {
-        summaryText += `Key patterns identified: ${patternNames.join(", ")}. `;
-      }
-    }
-  } else {
-    summaryText += `No significant day trading opportunities identified at this time. `;
-  }
-
-  const midTermTimeframes = Object.keys(midTermOutlook);
-  if (midTermTimeframes.length > 0) {
-    const bestMidTerm =
-      midTermTimeframes.find((tf) => midTermOutlook[tf].tradingOpportunity) ||
-      midTermTimeframes[0];
-
-    if (midTermOutlook[bestMidTerm].tradingOpportunity) {
-      summaryText += `For mid-term trading, a ${midTermOutlook[bestMidTerm].direction} opportunity was identified on the ${bestMidTerm} timeframe with ${midTermOutlook[bestMidTerm].confidence} confidence. `;
-
-      if (midTermOutlook[bestMidTerm].trendDirection !== "neutral") {
-        summaryText += `The trend is ${midTermOutlook[bestMidTerm].trendStrength} and ${midTermOutlook[bestMidTerm].trendDirection}. `;
-      }
-    } else {
-      summaryText += `No significant mid-term trading opportunities identified at this time. `;
-    }
-  }
-
-  if (marketBreadth) {
-    summaryText += `Market breadth analysis shows ${
-      marketBreadth.marketBreadthStrength
-    } conditions with ${marketBreadth.percentInUptrend.toFixed(
-      1
-    )}% of related symbols in uptrends. `;
-
-    if (marketBreadth.stronglyCorrelatedSymbols.length > 0) {
-      const correlatedSymbols = marketBreadth.stronglyCorrelatedSymbols
-        .map((item) => item.symbol)
-        .slice(0, 3);
-      summaryText += `Strongly correlated symbols include: ${correlatedSymbols.join(
-        ", "
-      )}. `;
-    }
-  }
-
-  summaryText += `Note: All trading involves risk. Use proper risk management and consider these analyses as one of many inputs for decision making.`;
-
-  return {
-    text: summaryText,
-    shortTermDirection: overallRecommendation.shortTerm.action,
-    midTermDirection: overallRecommendation.midTerm.action,
-    overallSentiment: overallRecommendation.sentiment,
-    confidence: overallRecommendation.confidence,
-    marketConditions: overallRecommendation.marketConditions,
-  };
-}
-
-function analyzeForDayTrading(
-  data,
-  indicators,
-  patterns,
-  advancedPatterns,
-  volatility,
-  volumeIndicators,
-  pivotPoints,
-  fibLevels
-) {
-  const lastCandle = data[data.length - 1];
-  const lastClose = lastCandle.close;
-  const nearPivotSupport =
-    pivotPoints &&
-    (Math.abs(lastClose - pivotPoints.support.s1) / lastClose < 0.002 ||
-      Math.abs(lastClose - pivotPoints.support.s2) / lastClose < 0.002);
-
-  const nearPivotResistance =
-    pivotPoints &&
-    (Math.abs(lastClose - pivotPoints.resistance.r1) / lastClose < 0.002 ||
-      Math.abs(lastClose - pivotPoints.resistance.r2) / lastClose < 0.002);
-
-  const nearFibLevel =
-    Math.abs(lastClose - fibLevels.level_38_2) / lastClose < 0.002 ||
-    Math.abs(lastClose - fibLevels.level_50_0) / lastClose < 0.002 ||
-    Math.abs(lastClose - fibLevels.level_61_8) / lastClose < 0.002;
-
-  const patternOpportunity =
-    patterns.doubleBottom ||
-    patterns.insideBars.found ||
-    advancedPatterns.bullishFlag.found ||
-    advancedPatterns.bearishFlag.found;
-
-  const momentumCondition =
-    patterns.momentumBurst.bullish ||
-    patterns.momentumBurst.bearish ||
-    indicators.rsi.rsi5[indicators.rsi.rsi5.length - 1] < 30 ||
-    indicators.rsi.rsi5[indicators.rsi.rsi5.length - 1] > 70;
-
-  const volatilitySqueeze = volatility.volatilitySqueeze;
-
-  const volumeConfirmation =
-    !volumeIndicators.divergence.shortTerm &&
-    volumeIndicators.volumeTrend === "increasing";
-
-  const tradingOpportunity =
-    (nearPivotSupport || nearPivotResistance || nearFibLevel) &&
-    (patternOpportunity || momentumCondition) &&
-    volumeConfirmation;
-
-  let direction = "neutral";
-  if (
-    nearPivotSupport &&
-    indicators.rsi.rsi5[indicators.rsi.rsi5.length - 1] < 30
-  ) {
-    direction = "long";
-  } else if (
-    nearPivotResistance &&
-    indicators.rsi.rsi5[indicators.rsi.rsi5.length - 1] > 70
-  ) {
-    direction = "short";
-  } else if (advancedPatterns.bullishFlag.found) {
-    direction = "long";
-  } else if (advancedPatterns.bearishFlag.found) {
-    direction = "short";
-  }
-
-  let stopLoss, target;
-  if (direction === "long") {
-    stopLoss = Math.min(
-      lastCandle.low,
-      pivotPoints ? pivotPoints.support.s1 : lastCandle.low * 0.998
-    );
-    target = lastClose + (lastClose - stopLoss) * 1.5; // 1.5:1 reward-to-risk ratio
-  } else if (direction === "short") {
-    stopLoss = Math.max(
-      lastCandle.high,
-      pivotPoints ? pivotPoints.resistance.r1 : lastCandle.high * 1.002
-    );
-    target = lastClose - (stopLoss - lastClose) * 1.5; // 1.5:1 reward-to-risk ratio
-  }
-
-  return {
-    tradingOpportunity,
-    direction,
-    keyLevels: {
-      supportLevels: pivotPoints
-        ? [pivotPoints.support.s1, pivotPoints.support.s2]
-        : [],
-      resistanceLevels: pivotPoints
-        ? [pivotPoints.resistance.r1, pivotPoints.resistance.r2]
-        : [],
-      fibonacciLevels: [
-        fibLevels.level_38_2,
-        fibLevels.level_50_0,
-        fibLevels.level_61_8,
-      ],
-    },
-    patterns: {
-      ...patterns,
-      ...advancedPatterns,
-    },
-    entry: lastClose,
-    stopLoss,
-    target,
-    riskRewardRatio:
-      stopLoss && target
-        ? Math.abs((target - lastClose) / (stopLoss - lastClose))
-        : null,
-    timeValidity: "1-4 hours", // Day trading positions should not be held overnight
-    confidence: tradingOpportunity ? "high" : "low",
-  };
-}
 
 function analyzeForMidTerm(
   data,
@@ -1853,12 +1461,13 @@ app.use(express.json());
 app.get("/api/enhanced-analyze/:symbol", async (req, res) => {
   try {
     const symbol = req.params.symbol.toUpperCase();
-    const analysis = await comprehensiveTradingAnalysis(symbol);
+    const analysis = await comprehensiveTradingAnalysis(symbol,[symbol]);
     res.json(analysis);
   } catch (error) {
     res.status(500).json({ error: error.message });
   }
 });
+
 
 app.listen(PORT, () => {
   console.log(`Forex trading API running on port ${PORT}`);
