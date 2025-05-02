@@ -20,11 +20,12 @@ async function fetchHistoricalData(
   { startDate, endDate, limit } = {}
 ) {
   const timeframesMap = {
-    "3m": { unit: "minute", daysBack: 15, apiLimit: 20000, time: 3 },
-    "5m": { unit: "minute", daysBack: 25, apiLimit: 20000, time: 5 },
+    "2m": { unit: "minute", daysBack:5, apiLimit: 20000, time: 2 },
+    "3m": { unit: "minute", daysBack:5, apiLimit: 20000, time: 3 },
+    "5m": { unit: "minute", daysBack: 10, apiLimit: 20000, time: 5 },
     "15m": { unit: "minute", daysBack: 25, apiLimit: 20000, time: 15 },
-    "30m": { unit: "minute", daysBack: 25, apiLimit: 5000, time: 30 },
-    "1h": { unit: "hour", daysBack: 30, apiLimit: 10000, time: 1 },
+    "30m": { unit: "minute", daysBack: 30, apiLimit: 5000, time: 30 },
+    "1h": { unit: "hour", daysBack: 50, apiLimit: 10000, time: 1 },
     "1D": { unit: "day", daysBack: 90, apiLimit: 5000, time: 1 },
   };
 
@@ -68,10 +69,10 @@ async function fetchHistoricalData(
         'YYYY-MM-DD'
       )}?apikey=${getRandomApiKey()}&limit=${apiLimit}`;
 
-      console.log("url",url);
       
-
+      
       const { data } = await axios.get(url);
+      console.log("url",url,data.results?.length);
       const formattedData = data.results
         .map(({ t, o, h, l, c, v }) => ({
           timestamp: t,
@@ -847,18 +848,21 @@ function calculateTakeProfit(direction, analysis) {
 
 async function performFullAnalysis() {
   // 1. Multi-Timeframe Data Collection
-  const timeframes = ['3m','5m', '15m', '1h'];
+  const timeframes = ['2m','3m','5m', '15m',"30m",'1h'];
   const data = {};
   for (const tf of timeframes) {
-    data[tf] = await fetchHistoricalData('XAUUSD', tf, 300);
+    data[tf] = await fetchHistoricalData('XAUUSD', tf, 7000);
   }
 
   // 2. Unified Indicator Calculation
   const indicators = {
-    primary: calculateIndicators(data['3m']),
+    primary: calculateIndicators(data['5m']),
     secondary: {
+      '2m': calculateIndicators(data['2m']),
+      '3m': calculateIndicators(data['3m']),
       '5m': calculateIndicators(data['5m']),
       '15m': calculateIndicators(data['15m']),
+      '30m': calculateIndicators(data['30m']),
       '1h': calculateIndicators(data['1h'])
     }
   };
@@ -882,11 +886,12 @@ async function performFullAnalysis() {
 // New Critical Integration Points
 function checkMultiTFAlignment(timeframeIndicators) {
   const alignmentScore = {
+    '2m': timeframeIndicators['2m'].ema.ema21 > timeframeIndicators['2m'].sma.sma50 ? 1 : -1,
     '3m': timeframeIndicators['3m'].ema.ema21 > timeframeIndicators['3m'].sma.sma50 ? 1 : -1,
     '5m': timeframeIndicators['5m'].ema.ema21 > timeframeIndicators['5m'].sma.sma50 ? 1 : -1,
     '15m': timeframeIndicators['15m'].macd.slice(-1)[0].histogram > 0 ? 1 : -1
   };
-  return alignmentScore['3m'] + alignmentScore['5m'] + alignmentScore['15m'];
+  return alignmentScore['3m'] + alignmentScore['5m'] + alignmentScore['15m']  + alignmentScore['2m'];
 }
 
 // Preserved Pattern Detection (From Your Code)
@@ -1121,6 +1126,12 @@ function checkEntrySignal(indicators, session) {
 function checkMultiTFAlignment(timeframeIndicators) {
   // Calculate alignment scores across timeframes
   const alignmentScores = {
+    '2m': {
+      direction: timeframeIndicators['2m'].ema.ema21[timeframeIndicators['2m'].ema.ema21.length - 1] > 
+                timeframeIndicators['2m'].sma.sma50[timeframeIndicators['2m'].sma.sma50.length - 1] ? 1 : -1,
+      macd: timeframeIndicators['2m'].macd[timeframeIndicators['2m'].macd.length - 1].histogram > 0 ? 1 : -1,
+      rsi: timeframeIndicators['2m'].rsi.rsi14[timeframeIndicators['2m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
+    },
     '3m': {
       direction: timeframeIndicators['3m'].ema.ema21[timeframeIndicators['3m'].ema.ema21.length - 1] > 
                 timeframeIndicators['3m'].sma.sma50[timeframeIndicators['3m'].sma.sma50.length - 1] ? 1 : -1,
@@ -1138,6 +1149,12 @@ function checkMultiTFAlignment(timeframeIndicators) {
                  timeframeIndicators['15m'].sma.sma50[timeframeIndicators['15m'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['15m'].macd[timeframeIndicators['15m'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['15m'].rsi.rsi14[timeframeIndicators['15m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
+    },
+    '30m': {
+      direction: timeframeIndicators['30m'].ema.ema21[timeframeIndicators['30m'].ema.ema21.length - 1] > 
+                 timeframeIndicators['30m'].sma.sma50[timeframeIndicators['30m'].sma.sma50.length - 1] ? 1 : -1,
+      macd: timeframeIndicators['30m'].macd[timeframeIndicators['30m'].macd.length - 1].histogram > 0 ? 1 : -1,
+      rsi: timeframeIndicators['30m'].rsi.rsi14[timeframeIndicators['30m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     },
     '1h': {
       direction: timeframeIndicators['1h'].ema.ema21[timeframeIndicators['1h'].ema.ema21.length - 1] > 
@@ -1192,25 +1209,31 @@ function checkMultiTFAlignment(timeframeIndicators) {
 async function performFullAnalysis() {
   try {
     // 1. Multi-Timeframe Data Collection
-    const timeframes = ['3m', '5m', '15m', '1h'];
+    const timeframes = ['2m','3m', '5m', '15m','30m','1h'];
     const data = {};
     for (const tf of timeframes) {
-      data[tf] = await fetchHistoricalData('XAUUSD', tf, { limit: 300 });
+      data[tf] = await fetchHistoricalData('XAUUSD', tf, { limit: 7000 });
     }
 
     // 2. Unified Indicator Calculation
     const indicators = {
-      primary: calculateIndicators(data['3m']),
+      primary: calculateIndicators(data['5m']),
       secondary: {
+        '2m':calculateIndicators(data['2m']),
         '3m':calculateIndicators(data['3m']),
         '5m': calculateIndicators(data['5m']),
         '15m': calculateIndicators(data['15m']),
+        '30m': calculateIndicators(data['30m']),
         '1h': calculateIndicators(data['1h'])
       }
     };
 
     // 3. Enhanced Pattern Detection
     const patterns = identifyAdvancedPatterns(data['1h']);
+
+    const patternDirection = determinePatternDirection(patterns)
+    
+    console.log("patternDirection",patternDirection);
     
     // 4. Session-Based Context
     const session = getCurrentSession();
@@ -1224,30 +1247,52 @@ async function performFullAnalysis() {
     // 7. Multi-Timeframe Confirmation with Confidence
     const mtfAlignment = checkMultiTFAlignment(indicators.secondary);
     
-    // 8. Calculate Overall Direction Confidence
-    // Weight the different analyses
-    const weights = {
+     // 8. Calculate Overall Direction Confidence with Breakdown
+     const weights = {
       primaryTrend: 0.4,
       mtfAlignment: 0.4,
       patternConfirmation: 0.2
     };
-    
-    // Get pattern confirmation direction
-    const patternDirection = determinePatternDirection(patterns);
-    
-    // Calculate weighted confidence
-    const overallDirection = 
-      (trend.direction === 'bullish' ? 1 : -1) * weights.primaryTrend +
-      (mtfAlignment.direction === 'bullish' ? 1 : -1) * weights.mtfAlignment +
-      patternDirection * weights.patternConfirmation;
+
+    // Calculate individual contributions
+    let bullishContrib = 0;
+    let bearishContrib = 0;
+
+    // Trend Contribution
+    if (trend.direction === 'bullish') {
+      bullishContrib += weights.primaryTrend;
+    } else {
+      bearishContrib += weights.primaryTrend;
+    }
+
+    // MTF Alignment Contribution
+    if (mtfAlignment.direction === 'bullish') {
+      bullishContrib += weights.mtfAlignment;
+    } else {
+      bearishContrib += weights.mtfAlignment;
+    }
+
+    // Pattern Contribution (patternDirection ranges from -1 to 1)
+    if (patternDirection > 0) {
+      bullishContrib += patternDirection * weights.patternConfirmation;
+    } else {
+      bearishContrib += Math.abs(patternDirection) * weights.patternConfirmation;
+    }
+
+    // Calculate confidence percentages
+    const bullishConfidence = bullishContrib * 100;
+    const bearishConfidence = bearishContrib * 100;
+    const netDirection = bullishContrib - bearishContrib;
 
     const overallConfidence = {
-      direction: overallDirection > 0 ? 'bullish' : 'bearish',
-      confidence: parseFloat((Math.abs(overallDirection) * 100).toFixed(2)),
+      direction: netDirection > 0 ? 'bullish' : 'bearish',
+      confidence: parseFloat((Math.abs(netDirection) * 100).toFixed(2)),
+      bullishConfidence: parseFloat(bullishConfidence.toFixed(2)),
+      bearishConfidence: parseFloat(bearishConfidence.toFixed(2)),
       assessment: 
-        Math.abs(overallDirection) > 0.8 ? 'very high confidence' :
-        Math.abs(overallDirection) > 0.6 ? 'high confidence' :
-        Math.abs(overallDirection) > 0.4 ? 'moderate confidence' :
+        Math.abs(netDirection) > 0.8 ? 'very high confidence' :
+        Math.abs(netDirection) > 0.6 ? 'high confidence' :
+        Math.abs(netDirection) > 0.4 ? 'moderate confidence' :
         'low confidence'
     };
 
@@ -1275,7 +1320,7 @@ async function performFullAnalysis() {
 // Helper function to determine direction from patterns
 function determinePatternDirection(patterns) {
   let patternScore = 0;
-  
+
   // Check for specific bullish patterns
   if (patterns.bullishFlag?.found) patternScore += 1;
   if (patterns.ascendingTriangle?.found) patternScore += 1;
