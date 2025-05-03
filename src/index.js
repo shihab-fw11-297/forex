@@ -20,8 +20,8 @@ async function fetchHistoricalData(
   { startDate, endDate, limit } = {}
 ) {
   const timeframesMap = {
-    "2m": { unit: "minute", daysBack:5, apiLimit: 20000, time: 2 },
-    "3m": { unit: "minute", daysBack:5, apiLimit: 20000, time: 3 },
+    "2m": { unit: "minute", daysBack: 5, apiLimit: 20000, time: 2 },
+    "3m": { unit: "minute", daysBack: 5, apiLimit: 20000, time: 3 },
     "5m": { unit: "minute", daysBack: 10, apiLimit: 20000, time: 5 },
     "15m": { unit: "minute", daysBack: 25, apiLimit: 20000, time: 15 },
     "30m": { unit: "minute", daysBack: 30, apiLimit: 5000, time: 30 },
@@ -36,12 +36,12 @@ async function fetchHistoricalData(
   const now = moment().startOf('day');
   const defaultStart = moment(now).subtract(config.daysBack, 'days');
   const defaultEnd = moment(now).add(2, 'days');
-  
-  const start = startDate 
+
+  const start = startDate
     ? moment(startDate).startOf('day')
     : defaultStart;
-  const end = endDate 
-    ? moment(endDate).endOf('day') 
+  const end = endDate
+    ? moment(endDate).endOf('day')
     : defaultEnd;
 
   if (start.isAfter(end)) {
@@ -50,7 +50,7 @@ async function fetchHistoricalData(
 
   // Cache key with date range fingerprint
   const cacheKey = `${symbol}-${timeframe}-${start.format('YYYYMMDD')}-${end.format('YYYYMMDD')}`;
-  
+
   if (cache[cacheKey] && Date.now() - cache[cacheKey].timestamp < 60 * 60 * 1000) {
     return cache[cacheKey].data.slice(0, limit);
   }
@@ -59,20 +59,19 @@ async function fetchHistoricalData(
     let allData = [];
     let currentStart = moment(start);
     const apiLimit = Math.min(config.apiLimit, limit || Infinity);
-    
-    // Pagination handling
-    while(currentStart.isBefore(end)) {
-      const batchEnd = moment.min(end, moment(currentStart).add(1, 'month'));
-      const url = `${BASE_URL}/agg/forex/${symbol.toLowerCase()}/${
-        config.time
-      }/${config.unit}/${currentStart.format('YYYY-MM-DD')}/${batchEnd.format(
-        'YYYY-MM-DD'
-      )}?apikey=${getRandomApiKey()}&limit=${apiLimit}`;
 
-      
-      
+    // Pagination handling
+    while (currentStart.isBefore(end)) {
+      const batchEnd = moment.min(end, moment(currentStart).add(1, 'month'));
+      const url = `${BASE_URL}/agg/forex/${symbol.toLowerCase()}/${config.time
+        }/${config.unit}/${currentStart.format('YYYY-MM-DD')}/${batchEnd.format(
+          'YYYY-MM-DD'
+        )}?apikey=${getRandomApiKey()}&limit=${apiLimit}`;
+
+
+
       const { data } = await axios.get(url);
-      console.log("url",url,data.results?.length);
+      console.log("url", url, data.results?.length);
       const formattedData = data.results
         .map(({ t, o, h, l, c, v }) => ({
           timestamp: t,
@@ -85,7 +84,7 @@ async function fetchHistoricalData(
         .sort((a, b) => a.timestamp - b.timestamp);
 
       allData = [...allData, ...formattedData];
-      
+
       if (data.results.length < apiLimit || allData.length >= limit) break;
       currentStart = moment(data.results[data.results.length - 1].t).add(1, 'ms');
     }
@@ -168,6 +167,7 @@ function calculateIndicators(data) {
     });
 
     return {
+      data,
       sma: { sma20, sma50, sma200 },
       ema: { ema10, ema21 },
       macd,
@@ -175,6 +175,7 @@ function calculateIndicators(data) {
       bb,
       adx,
       atr,
+      volumes,
       lastClose: closes[closes.length - 1],
       lastCandle: data[data.length - 1],
     };
@@ -316,6 +317,43 @@ function detectBearishFlag(data) {
   }
 }
 
+// Add this utility function near the top of your code
+function mostCommonValue(values, tolerancePercent = 0.005) {
+  if (!values.length) return null;
+  
+  // Sort and cluster values with price-aware grouping
+  const sorted = [...values].sort((a, b) => a - b);
+  const clusters = [];
+  let currentCluster = [sorted[0]];
+
+  for (let i = 1; i < sorted.length; i++) {
+    const avg = currentCluster.reduce((a, b) => a + b, 0) / currentCluster.length;
+    const tolerance = avg * tolerancePercent;
+    
+    if (sorted[i] <= avg + tolerance) {
+      currentCluster.push(sorted[i]);
+    } else {
+      clusters.push(currentCluster);
+      currentCluster = [sorted[i]];
+    }
+  }
+  clusters.push(currentCluster);
+
+  // Find the most significant cluster (size + density)
+  const significantClusters = clusters
+    .map(cluster => ({
+      mean: cluster.reduce((a, b) => a + b, 0) / cluster.length,
+      size: cluster.length,
+      density: (Math.max(...cluster) - Math.min(...cluster)) / cluster[0]
+    }))
+    .sort((a, b) => 
+      b.size - a.size ||  // First sort by cluster size
+      a.density - b.density  // Then by tightest grouping
+    );
+
+  return significantClusters[0]?.mean || null;
+}
+
 function detectAscendingTriangle(data) {
   if (data.length < 20) return { found: false };
   const recentData = data.slice(-20);
@@ -337,7 +375,7 @@ function detectAscendingTriangle(data) {
   }
 
   if (potentialResistanceLevels.length === 0) return { found: false };
-  const resistanceLevel = mostCommonValue(potentialResistanceLevels);
+  const resistanceLevel = mostCommonValue(potentialResistanceLevels, 0.0075); // 0.75% tolerance
   let risingSupport = true;
   for (let i = 5; i < lows.length; i += 5) {
     if (lows[i] <= lows[i - 5]) {
@@ -379,7 +417,7 @@ function detectDescendingTriangle(data) {
   }
 
   if (potentialSupportLevels.length === 0) return { found: false };
-  const supportLevel = mostCommonValue(potentialSupportLevels);
+  const supportLevel = mostCommonValue(potentialSupportLevels, 0.0075); // 0.75% tolerance
   let fallingResistance = true;
   for (let i = 5; i < highs.length; i += 5) {
     if (highs[i] >= highs[i - 5]) {
@@ -569,6 +607,20 @@ function identifyExistingPatterns(data) {
   return patterns;
 }
 
+function identifyAdvancedPatterns(data) {
+  const patterns = {
+    ...identifyExistingPatterns(data),
+    cupHandle: detectCupAndHandle(data),
+    wedges: detectWedges(data),
+    rectangle: detectRectangleFormations(data),
+    doubleTops: detectDoubleTopBottom(data),
+    tripleTops: detectTripleTopBottom(data),
+    islandReversals: identifyIslandReversals(data)
+  };
+
+  return patterns;
+}
+
 function findSignificantTroughs(data, lookbackPeriod) {
   const troughs = [];
   for (let i = lookbackPeriod; i < data.length - lookbackPeriod; i++) {
@@ -664,20 +716,6 @@ function identifyIslandReversals(data) {
   }
 }
 
-function identifyAdvancedPatterns(data) {
-  const patterns = {
-    ...identifyExistingPatterns(data),
-    cupHandle: detectCupAndHandle(data),
-    wedges: detectWedges(data),
-    rectangle: detectRectangleFormations(data),
-    doubleTops: detectDoubleTopBottom(data),
-    tripleTops: detectTripleTopBottom(data),
-    islandReversals: identifyIslandReversals(data)
-  };
-
-  return patterns;
-}
-
 function detectHeadAndShoulders(data) {
   try {
     if (data.length < 30) return { found: false };
@@ -732,12 +770,22 @@ function getCurrentSession() {
 app.get('/analyze/xauusd', async (req, res) => {
   try {
     const analysis = await performFullAnalysis();
-    
+     // Get critical S/R levels
+     const srLevels = analysis.supportResistance || { supports: [], resistances: [] };
+     const keySupport = srLevels.supports[0]?.price || null;
+     const keyResistance = srLevels.resistances[0]?.price || null;
+
     // Add summary for quick reference
     const summary = {
       price: analysis.price,
       direction: analysis.overallAssessment.direction,
       confidence: analysis.overallAssessment.confidence,
+      trend: analysis.trend,
+      keyLevels: {
+        support: keySupport,
+        resistance: keyResistance
+      },
+      reversalAlert: analysis.potentialReversal,
       recommendation: generateTradeRecommendation(analysis),
       signals: {
         buy: analysis.signals.buy,
@@ -746,7 +794,7 @@ app.get('/analyze/xauusd', async (req, res) => {
         sellConfidence: analysis.signals.sellConfidence
       }
     };
-    
+
     res.json({
       status: 'success',
       timestamp: analysis.timestamp,
@@ -769,9 +817,9 @@ function generateTradeRecommendation(analysis) {
   const { direction, confidence } = analysis.overallAssessment;
   const { buy, sell, buyConfidence, sellConfidence } = analysis.signals;
 
-  console.log("direction, confidence",direction, confidence);
-  
-  
+  console.log("direction, confidence", direction, confidence);
+
+
   // Determine if we should recommend a trade
   if (direction === 'bullish' && buy && confidence > 60 && buyConfidence > 60) {
     return {
@@ -781,7 +829,7 @@ function generateTradeRecommendation(analysis) {
       takeProfit: calculateTakeProfit('buy', analysis),
       rationale: 'Bullish trend with strong buy signals across multiple timeframes'
     };
-  } 
+  }
   else if (direction === 'bearish' && sell && confidence > 60 && sellConfidence > 60) {
     return {
       action: 'SELL',
@@ -820,10 +868,10 @@ function generateTradeRecommendation(analysis) {
 // Helper functions for risk management
 function calculateStopLoss(direction, analysis) {
   const price = analysis.price;
-  const atr = analysis.trend.indicators?.atr || 
-              analysis.primary?.atr?.[analysis.primary.atr.length - 1] || 
-              (price * 0.005); // Default to 0.5% if ATR not available
-  
+  const atr = analysis.trend.indicators?.atr ||
+    analysis.primary?.atr?.[analysis.primary.atr.length - 1] ||
+    (price * 0.005); // Default to 0.5% if ATR not available
+
   if (direction === 'buy') {
     return parseFloat((price - (atr * 1.5)).toFixed(2));
   } else {
@@ -833,54 +881,17 @@ function calculateStopLoss(direction, analysis) {
 
 function calculateTakeProfit(direction, analysis) {
   const price = analysis.price;
-  const atr = analysis.trend.indicators?.atr || 
-              analysis.primary?.atr?.[analysis.primary.atr.length - 1] || 
-              (price * 0.005); // Default to 0.5% if ATR not available
-  
+  const atr = analysis.trend.indicators?.atr ||
+    analysis.primary?.atr?.[analysis.primary.atr.length - 1] ||
+    (price * 0.005); // Default to 0.5% if ATR not available
+
   const riskRewardRatio = 2.0; // 1:2 risk-reward
-  
+
   if (direction === 'buy') {
     return parseFloat((price + (atr * 1.5 * riskRewardRatio)).toFixed(2));
   } else {
     return parseFloat((price - (atr * 1.5 * riskRewardRatio)).toFixed(2));
   }
-}
-
-async function performFullAnalysis() {
-  // 1. Multi-Timeframe Data Collection
-  const timeframes = ['2m','3m','5m', '15m',"30m",'1h'];
-  const data = {};
-  for (const tf of timeframes) {
-    data[tf] = await fetchHistoricalData('XAUUSD', tf, 7000);
-  }
-
-  // 2. Unified Indicator Calculation
-  const indicators = {
-    primary: calculateIndicators(data['5m']),
-    secondary: {
-      '2m': calculateIndicators(data['2m']),
-      '3m': calculateIndicators(data['3m']),
-      '5m': calculateIndicators(data['5m']),
-      '15m': calculateIndicators(data['15m']),
-      '30m': calculateIndicators(data['30m']),
-      '1h': calculateIndicators(data['1h'])
-    }
-  };
-
-  // 3. Enhanced Pattern Detection (Your Existing Code)
-  const patterns = identifyAdvancedPatterns(data['1h']);
-  // 5. Session-Based Adjustments
-  const session = getCurrentSession();
-
-  return {
-    timestamp: Date.now(),
-    price: indicators.primary.lastClose,
-    trend: checkTrend(indicators.primary),
-    signals: checkEntrySignal(indicators.primary, session),
-    patterns: patterns,
-    multiTimeframeConfirmation: checkMultiTFAlignment(indicators.secondary),
-    session: session
-  };
 }
 
 // New Critical Integration Points
@@ -891,19 +902,7 @@ function checkMultiTFAlignment(timeframeIndicators) {
     '5m': timeframeIndicators['5m'].ema.ema21 > timeframeIndicators['5m'].sma.sma50 ? 1 : -1,
     '15m': timeframeIndicators['15m'].macd.slice(-1)[0].histogram > 0 ? 1 : -1
   };
-  return alignmentScore['3m'] + alignmentScore['5m'] + alignmentScore['15m']  + alignmentScore['2m'];
-}
-
-// Preserved Pattern Detection (From Your Code)
-function identifyAdvancedPatterns(data) {
-  return {
-    cupHandle: detectCupAndHandle(data),
-    wedges: detectWedges(data),
-    rectangle: detectRectangleFormations(data),
-    doubleTops: detectDoubleTopBottom(data),
-    tripleTops: detectTripleTopBottom(data),
-    islandReversals: identifyIslandReversals(data)
-  };
+  return alignmentScore['3m'] + alignmentScore['5m'] + alignmentScore['15m'] + alignmentScore['2m'];
 }
 
 // Missing Functions
@@ -917,14 +916,14 @@ function checkTrend(indicators) {
     const { bb } = indicators;
     const lastClose = indicators.lastClose;
     const lastMacd = indicators.macd[indicators.macd.length - 1];
-    
+
     // Direction signals (traditional method)
     const smaDirection = sma50[sma50.length - 1] > sma200[sma200.length - 1] ? 1 : -1;
     const emaDirection = ema10[ema10.length - 1] > ema21[ema21.length - 1] ? 1 : -1;
     const macdDirection = lastMacd.histogram > 0 ? 1 : -1;
     const rsiDirection = rsi14[rsi14.length - 1] > 50 ? 1 : -1;
     const bbPosition = lastClose > bb[bb.length - 1].middle ? 1 : -1;
-    
+
     // Calculate weighted direction score
     const directionWeights = {
       sma: 0.25,
@@ -933,7 +932,7 @@ function checkTrend(indicators) {
       rsi: 0.15,
       bb: 0.15
     };
-    
+
     const directionScore = (
       smaDirection * directionWeights.sma +
       emaDirection * directionWeights.ema +
@@ -941,20 +940,20 @@ function checkTrend(indicators) {
       rsiDirection * directionWeights.rsi +
       bbPosition * directionWeights.bb
     );
-    
+
     // Determine overall direction
     const direction = directionScore > 0 ? 'bullish' : 'bearish';
-    
+
     // Calculate confidence percentage (0 to 100%)
     const confidencePercentage = Math.abs(directionScore) * 100;
-    
+
     // Trend strength calculation based on ADX
     const adxValue = adx[adx.length - 1];
     const trendStrength = adxValue > 25 ? 'strong' : 'weak';
-    const strengthIntensity = adxValue > 40 ? 'very strong' : 
-                             adxValue > 25 ? 'strong' : 
-                             adxValue > 15 ? 'moderate' : 'weak';
-    
+    const strengthIntensity = adxValue > 40 ? 'very strong' :
+      adxValue > 25 ? 'strong' :
+        adxValue > 15 ? 'moderate' : 'weak';
+
     // Detailed indicator alignment
     const indicatorAlignment = {
       movingAverages: {
@@ -968,7 +967,7 @@ function checkTrend(indicators) {
         aligned: macdDirection === rsiDirection
       }
     };
-    
+
     return {
       direction,
       confidence: parseFloat(confidencePercentage.toFixed(2)),
@@ -1004,7 +1003,7 @@ function checkEntrySignal(indicators, session) {
     const { bb } = indicators;
     const { atr } = indicators;
     const lastCandle = indicators.lastCandle;
-    
+
     // Extract last values
     const lastMacd = macd[macd.length - 1];
     const prevMacd = macd[macd.length - 2];
@@ -1012,7 +1011,7 @@ function checkEntrySignal(indicators, session) {
     const fastRsi = rsi5[rsi5.length - 1];
     const lastBB = bb[bb.length - 1];
     const lastAtr = atr[atr.length - 1];
-    
+
     // Buy signal criteria
     const macdCrossingUp = lastMacd.MACD > lastMacd.signal && prevMacd.MACD <= prevMacd.signal;
     const macdPositive = lastMacd.histogram > 0;
@@ -1020,17 +1019,17 @@ function checkEntrySignal(indicators, session) {
     const rsiRecovering = rsi14[rsi14.length - 1] > rsi14[rsi14.length - 2];
     const priceAboveSma = lastCandle.close > sma20[sma20.length - 1];
     const bbSqueezing = (lastBB.upper - lastBB.lower) < (lastBB.upper * 0.02); // 2% range
-    
+
     // Sell signal criteria
     const macdCrossingDown = lastMacd.MACD < lastMacd.signal && prevMacd.MACD >= prevMacd.signal;
     const macdNegative = lastMacd.histogram < 0;
     const rsiOverbought = currentRsi > 60;
     const rsiFalling = rsi14[rsi14.length - 1] < rsi14[rsi14.length - 2];
     const priceBelowSma = lastCandle.close < sma20[sma20.length - 1];
-    
+
     // Session-specific adjustments
     let sessionMultiplier = 1.0;
-    switch(session) {
+    switch (session) {
       case 'asian':
         sessionMultiplier = 0.8; // Generally less volatile
         break;
@@ -1046,7 +1045,7 @@ function checkEntrySignal(indicators, session) {
       default:
         sessionMultiplier = 1.0;
     }
-    
+
     // Calculate buy signal confidence
     const buyFactors = [
       macdCrossingUp ? 30 : (macdPositive ? 15 : 0),
@@ -1055,9 +1054,9 @@ function checkEntrySignal(indicators, session) {
       priceAboveSma ? 20 : 0,
       bbSqueezing ? 15 : 0
     ];
-    
+
     const buyConfidence = buyFactors.reduce((sum, factor) => sum + factor, 0) * sessionMultiplier;
-    
+
     // Calculate sell signal confidence
     const sellFactors = [
       macdCrossingDown ? 30 : (macdNegative ? 15 : 0),
@@ -1066,17 +1065,17 @@ function checkEntrySignal(indicators, session) {
       priceBelowSma ? 20 : 0,
       bbSqueezing ? 15 : 0
     ];
-    
+
     const sellConfidence = sellFactors.reduce((sum, factor) => sum + factor, 0) * sessionMultiplier;
-    
+
     // Adjust based on volatility
     const volatilityFactor = lastAtr / lastCandle.close;
     const volatilityMultiplier = volatilityFactor > 0.005 ? 1.1 : 0.9; // Adjust based on ATR%
-    
+
     // Final signals
     const buySignal = buyConfidence * volatilityMultiplier >= 50;
     const sellSignal = sellConfidence * volatilityMultiplier >= 50;
-    
+
     return {
       buy: buySignal,
       sell: sellSignal,
@@ -1127,61 +1126,61 @@ function checkMultiTFAlignment(timeframeIndicators) {
   // Calculate alignment scores across timeframes
   const alignmentScores = {
     '2m': {
-      direction: timeframeIndicators['2m'].ema.ema21[timeframeIndicators['2m'].ema.ema21.length - 1] > 
-                timeframeIndicators['2m'].sma.sma50[timeframeIndicators['2m'].sma.sma50.length - 1] ? 1 : -1,
+      direction: timeframeIndicators['2m'].ema.ema21[timeframeIndicators['2m'].ema.ema21.length - 1] >
+        timeframeIndicators['2m'].sma.sma50[timeframeIndicators['2m'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['2m'].macd[timeframeIndicators['2m'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['2m'].rsi.rsi14[timeframeIndicators['2m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     },
     '3m': {
-      direction: timeframeIndicators['3m'].ema.ema21[timeframeIndicators['3m'].ema.ema21.length - 1] > 
-                timeframeIndicators['3m'].sma.sma50[timeframeIndicators['3m'].sma.sma50.length - 1] ? 1 : -1,
+      direction: timeframeIndicators['3m'].ema.ema21[timeframeIndicators['3m'].ema.ema21.length - 1] >
+        timeframeIndicators['3m'].sma.sma50[timeframeIndicators['3m'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['3m'].macd[timeframeIndicators['3m'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['3m'].rsi.rsi14[timeframeIndicators['3m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     },
     '5m': {
-      direction: timeframeIndicators['5m'].ema.ema21[timeframeIndicators['5m'].ema.ema21.length - 1] > 
-                timeframeIndicators['5m'].sma.sma50[timeframeIndicators['5m'].sma.sma50.length - 1] ? 1 : -1,
+      direction: timeframeIndicators['5m'].ema.ema21[timeframeIndicators['5m'].ema.ema21.length - 1] >
+        timeframeIndicators['5m'].sma.sma50[timeframeIndicators['5m'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['5m'].macd[timeframeIndicators['5m'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['5m'].rsi.rsi14[timeframeIndicators['5m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     },
     '15m': {
-      direction: timeframeIndicators['15m'].ema.ema21[timeframeIndicators['15m'].ema.ema21.length - 1] > 
-                 timeframeIndicators['15m'].sma.sma50[timeframeIndicators['15m'].sma.sma50.length - 1] ? 1 : -1,
+      direction: timeframeIndicators['15m'].ema.ema21[timeframeIndicators['15m'].ema.ema21.length - 1] >
+        timeframeIndicators['15m'].sma.sma50[timeframeIndicators['15m'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['15m'].macd[timeframeIndicators['15m'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['15m'].rsi.rsi14[timeframeIndicators['15m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     },
     '30m': {
-      direction: timeframeIndicators['30m'].ema.ema21[timeframeIndicators['30m'].ema.ema21.length - 1] > 
-                 timeframeIndicators['30m'].sma.sma50[timeframeIndicators['30m'].sma.sma50.length - 1] ? 1 : -1,
+      direction: timeframeIndicators['30m'].ema.ema21[timeframeIndicators['30m'].ema.ema21.length - 1] >
+        timeframeIndicators['30m'].sma.sma50[timeframeIndicators['30m'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['30m'].macd[timeframeIndicators['30m'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['30m'].rsi.rsi14[timeframeIndicators['30m'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     },
     '1h': {
-      direction: timeframeIndicators['1h'].ema.ema21[timeframeIndicators['1h'].ema.ema21.length - 1] > 
-                 timeframeIndicators['1h'].sma.sma50[timeframeIndicators['1h'].sma.sma50.length - 1] ? 1 : -1,
+      direction: timeframeIndicators['1h'].ema.ema21[timeframeIndicators['1h'].ema.ema21.length - 1] >
+        timeframeIndicators['1h'].sma.sma50[timeframeIndicators['1h'].sma.sma50.length - 1] ? 1 : -1,
       macd: timeframeIndicators['1h'].macd[timeframeIndicators['1h'].macd.length - 1].histogram > 0 ? 1 : -1,
       rsi: timeframeIndicators['1h'].rsi.rsi14[timeframeIndicators['1h'].rsi.rsi14.length - 1] > 50 ? 1 : -1
     }
   };
-  
+
   // Calculate bullish score (range -9 to +9 across 3 timeframes and 3 indicators each)
   const bullishScore = Object.values(alignmentScores).reduce((sum, tf) => {
     return sum + tf.direction + tf.macd + tf.rsi;
   }, 0);
-  
+
   // Calculate confidence based on alignment
   const maxPossibleScore = 9; // 3 timeframes * 3 indicators
   const alignmentConfidence = ((bullishScore + maxPossibleScore) / (2 * maxPossibleScore)) * 100;
-  
+
   // Categorize trend agreement
-  const trendAgreement = 
+  const trendAgreement =
     bullishScore >= 7 ? "strongly bullish" :
-    bullishScore >= 4 ? "moderately bullish" :
-    bullishScore >= 1 ? "weakly bullish" :
-    bullishScore <= -7 ? "strongly bearish" :
-    bullishScore <= -4 ? "moderately bearish" :
-    bullishScore <= -1 ? "weakly bearish" : "neutral";
-  
+      bullishScore >= 4 ? "moderately bullish" :
+        bullishScore >= 1 ? "weakly bullish" :
+          bullishScore <= -7 ? "strongly bearish" :
+            bullishScore <= -4 ? "moderately bearish" :
+              bullishScore <= -1 ? "weakly bearish" : "neutral";
+
   // Detailed breakdown of timeframe alignments
   const timeframeDetails = {};
   for (const [tf, scores] of Object.entries(alignmentScores)) {
@@ -1206,10 +1205,192 @@ function checkMultiTFAlignment(timeframeIndicators) {
   };
 }
 
+// Professional-Grade Support/Resistance Detection
+function calculateSupportResistance(data, params = {}) {
+  const config = {
+    pivotLookback: params.pivotLookback || 5,      // Default 5 candles for pivot detection
+    clusterTolerance: params.clusterTolerance || 0.003,  // 0.3% price grouping tolerance
+    minClusterSize: params.minClusterSize || 3,    // Minimum touches to form a level
+    volumeWeight: params.volumeWeight || true,     // Consider volume in level significance
+    timeframeWeight: params.timeframeWeight || 1,  // Weight factor for higher timeframes
+    ...params
+  };
+
+  const levels = {
+    supports: [],
+    resistances: []
+  };
+
+  // 1. Swing Point Detection using Fractal Logic
+  for (let i = config.pivotLookback; i < data.length - config.pivotLookback; i++) {
+    const windowHighs = [];
+    const windowLows = [];
+    
+    for (let j = -config.pivotLookback; j <= config.pivotLookback; j++) {
+      windowHighs.push(data[i + j].high);
+      windowLows.push(data[i + j].low);
+    }
+
+    // Detect Swing Highs (Potential Resistance)
+    if (data[i].high === Math.max(...windowHighs)) {
+      levels.resistances.push({
+        price: data[i].high,
+        timestamp: data[i].timestamp,
+        volume: data[i].volume,
+        touches: 1
+      });
+    }
+
+    // Detect Swing Lows (Potential Support)
+    if (data[i].low === Math.min(...windowLows)) {
+      levels.supports.push({
+        price: data[i].low,
+        timestamp: data[i].timestamp,
+        volume: data[i].volume,
+        touches: 1
+      });
+    }
+  }
+
+  // 2. Advanced Clustering Algorithm with Volume Weighting
+  const clusterLevels = (items, type) => {
+    const clusters = [];
+    items.sort((a, b) => a.price - b.price);
+
+    let currentCluster = [];
+    for (const item of items) {
+      if (currentCluster.length === 0) {
+        currentCluster.push(item);
+      } else {
+        const clusterCenter = currentCluster.reduce((sum, l) => sum + l.price, 0) / currentCluster.length;
+        const tolerance = clusterCenter * config.clusterTolerance;
+        
+        if (Math.abs(item.price - clusterCenter) <= tolerance) {
+          currentCluster.push(item);
+        } else {
+          clusters.push(currentCluster);
+          currentCluster = [item];
+        }
+      }
+    }
+    if (currentCluster.length > 0) clusters.push(currentCluster);
+
+    return clusters
+      .filter(cluster => cluster.length >= config.minClusterSize)
+      .map(cluster => {
+        const totalVolume = cluster.reduce((sum, l) => sum + l.volume, 0);
+        const weightedPrice = cluster.reduce((sum, l) => sum + (l.price * (config.volumeWeight ? l.volume : 1)), 0) /
+          (config.volumeWeight ? totalVolume : cluster.length);
+        
+        return {
+          price: weightedPrice,
+          strength: cluster.length * config.timeframeWeight,
+          volume: totalVolume,
+          timestamps: cluster.map(l => l.timestamp),
+          occurrences: cluster.length
+        };
+      })
+      .sort((a, b) => b.strength - a.strength);
+  };
+
+  return {
+    supports: clusterLevels(levels.supports, 'support'),
+    resistances: clusterLevels(levels.resistances, 'resistance')
+  };
+}
+// 1. Enhanced Multi-Timeframe S/R Detection
+async function calculateMultiTimeframeSupportResistance(symbol) {
+  try {
+    const timeframes = ['5m','15m', '30m', '1h', '1D'];
+    const allLevels = { supports: [], resistances: [] };
+
+    for (const tf of timeframes) {
+      const data = await fetchHistoricalData(symbol, tf, { limit: 1000 });
+      const levels = calculateSupportResistance(data);
+      
+      // Add null checks
+      if (levels?.supports) allLevels.supports.push(...levels.supports);
+      if (levels?.resistances) allLevels.resistances.push(...levels.resistances);
+    }
+
+    return {
+      supports: clusterAndScoreLevels(allLevels.supports) || [],
+      resistances: clusterAndScoreLevels(allLevels.resistances) || []
+    };
+  } catch (error) {
+    console.error("Support/resistance error:", error);
+    return { supports: [], resistances: [] }; // Ensure default structure
+  }
+}
+
+// 2. Volume-Weighted Clustering with Confluence Scoring
+function clusterAndScoreLevels(levels) {
+  const clustered = [];
+  levels.sort((a, b) => a.price - b.price);
+
+  let currentCluster = [];
+  for (const level of levels) {
+    if (currentCluster.length === 0) {
+      currentCluster.push(level);
+    } else {
+      const avgPrice = currentCluster.reduce((sum, l) => sum + l.price, 0) / currentCluster.length;
+      if (Math.abs(level.price - avgPrice) / avgPrice <= 0.0025) { // Tightened threshold
+        currentCluster.push(level);
+      } else {
+        clustered.push(processCluster(currentCluster));
+        currentCluster = [level];
+      }
+    }
+  }
+  if (currentCluster.length > 0) clustered.push(processCluster(currentCluster));
+
+  return clustered.sort((a, b) => b.score - a.score);
+}
+
+function processCluster(cluster) {
+  const price = cluster.reduce((sum, l) => sum + l.price, 0) / cluster.length;
+  const timeframes = [...new Set(cluster.map(l => l.timeframe))];
+  const score = cluster.reduce((sum, l) => sum + l.weight, 0) * timeframes.length;
+
+  return {
+    price,
+    score,
+    confluence: timeframes.length,
+    touches: cluster.length,
+    timeframes
+  };
+}
+
+// 3. Trend-Reversal Detection Logic
+function detectPotentialReversals(price, levels, trendDirection) {
+  const relevantLevels = levels
+    .filter(l =>
+      (trendDirection === 'bearish' && l.price > price) || // Resistances in downtrend
+      (trendDirection === 'bullish' && l.price < price)    // Supports in uptrend
+    )
+    .sort((a, b) => Math.abs(price - a.price) - Math.abs(price - b.price));
+
+  const nearestLevel = relevantLevels[0];
+  if (!nearestLevel) return null;
+
+  const distancePercent = Math.abs(price - nearestLevel.price) / price * 100;
+  const isBreaking =
+    (trendDirection === 'bearish' && price > nearestLevel.price) ||
+    (trendDirection === 'bullish' && price < nearestLevel.price);
+
+  return {
+    level: nearestLevel.price,
+    distance: distancePercent,
+    isBreaking,
+    strength: nearestLevel.score,
+    confluence: nearestLevel.confluence
+  };
+}
+
 async function performFullAnalysis() {
   try {
     // 1. Multi-Timeframe Data Collection
-    const timeframes = ['2m','3m', '5m', '15m','30m','1h'];
+    const timeframes = ['2m', '3m', '5m', '15m', '30m', '1h'];
     const data = {};
     for (const tf of timeframes) {
       data[tf] = await fetchHistoricalData('XAUUSD', tf, { limit: 7000 });
@@ -1219,8 +1400,8 @@ async function performFullAnalysis() {
     const indicators = {
       primary: calculateIndicators(data['5m']),
       secondary: {
-        '2m':calculateIndicators(data['2m']),
-        '3m':calculateIndicators(data['3m']),
+        '2m': calculateIndicators(data['2m']),
+        '3m': calculateIndicators(data['3m']),
         '5m': calculateIndicators(data['5m']),
         '15m': calculateIndicators(data['15m']),
         '30m': calculateIndicators(data['30m']),
@@ -1232,23 +1413,50 @@ async function performFullAnalysis() {
     const patterns = identifyAdvancedPatterns(data['1h']);
 
     const patternDirection = determinePatternDirection(patterns)
-    
-    console.log("patternDirection",patternDirection);
-    
+  
     // 4. Session-Based Context
     const session = getCurrentSession();
-    
+
     // 5. Calculate Trend with Confidence
     const trend = checkTrend(indicators.primary);
-    
+
     // 6. Calculate Entry Signals with Confidence
     const signals = checkEntrySignal(indicators.primary, session);
-    
+
     // 7. Multi-Timeframe Confirmation with Confidence
     const mtfAlignment = checkMultiTFAlignment(indicators.secondary);
-    
-     // 8. Calculate Overall Direction Confidence with Breakdown
-     const weights = {
+ 
+   // Calculate average volume correctly
+   const recentVolumes = indicators.primary.volumes.slice(-10);
+   const avgVolume = recentVolumes.length > 0 
+     ? recentVolumes.reduce((a, b) => a + b, 0) / recentVolumes.length 
+     : 0;
+     
+     const reversalConfirmation = {
+       volumeSurge: indicators.primary.lastCandle.volume > 1.5 * avgVolume,
+       candlePattern: detectReversalCandle(indicators.primary.lastCandle),
+       momentumDivergence: checkMomentumDivergence(indicators.primary)
+      }; 
+      
+      const srLevels = await calculateMultiTimeframeSupportResistance('XAUUSD') || { 
+        supports: [], 
+        resistances: [] 
+      };
+      
+        // Add S/R analysis
+     const price = indicators.primary.lastClose;
+     const trendDirection = trend.direction;
+ 
+     const potentialReversal = detectPotentialReversals(
+       price,
+       trendDirection === 'bullish'
+         ? srLevels.resistances
+         : srLevels.supports,
+       trendDirection
+     );
+
+    // 8. Calculate Overall Direction Confidence with Breakdown
+    const weights = {
       primaryTrend: 0.4,
       mtfAlignment: 0.4,
       patternConfirmation: 0.2
@@ -1285,15 +1493,18 @@ async function performFullAnalysis() {
     const netDirection = bullishContrib - bearishContrib;
 
     const overallConfidence = {
+      reversalSignal: potentialReversal?.isBreaking && reversalConfirmation.volumeSurge
+      ? 'strong'
+      : 'weak',
       direction: netDirection > 0 ? 'bullish' : 'bearish',
       confidence: parseFloat((Math.abs(netDirection) * 100).toFixed(2)),
       bullishConfidence: parseFloat(bullishConfidence.toFixed(2)),
       bearishConfidence: parseFloat(bearishConfidence.toFixed(2)),
-      assessment: 
+      assessment:
         Math.abs(netDirection) > 0.8 ? 'very high confidence' :
-        Math.abs(netDirection) > 0.6 ? 'high confidence' :
-        Math.abs(netDirection) > 0.4 ? 'moderate confidence' :
-        'low confidence'
+          Math.abs(netDirection) > 0.6 ? 'high confidence' :
+            Math.abs(netDirection) > 0.4 ? 'moderate confidence' :
+              'low confidence'
     };
 
     // 9. Compile final analysis
@@ -1305,6 +1516,9 @@ async function performFullAnalysis() {
       signals: signals,
       patterns: patterns,
       multiTimeframeConfirmation: mtfAlignment,
+      supportResistance: srLevels,
+      potentialReversal,
+      reversalConfirmation,
       overallAssessment: overallConfidence
     };
   } catch (error) {
@@ -1315,6 +1529,39 @@ async function performFullAnalysis() {
       message: error.message
     };
   }
+}
+
+// 5. Helper Functions
+function detectReversalCandle(candle) {
+  const isBullish = candle.close > candle.open;
+  const bodySize = Math.abs(candle.close - candle.open);
+  const upperWick = isBullish ? candle.high - candle.close : candle.high - candle.open;
+  const lowerWick = isBullish ? candle.open - candle.low : candle.close - candle.low;
+  
+  if (bodySize > 0.6 * (candle.high - candle.low)) {
+    return isBullish ? 'bullish_engulfing' : 'bearish_engulfing';
+  }
+  if (lowerWick > 2 * bodySize) return 'hammer';
+  if (upperWick > 2 * bodySize) return 'shooting_star';
+  return null;
+}
+
+function checkMomentumDivergence(indicators) {
+  // Add safety check for data existence
+  if (!indicators.data || indicators.data.length < 14) return null;
+  
+  const priceHighs = indicators.data.slice(-14).map(c => c.high);
+  const rsiHighs = indicators.rsi.rsi14.slice(-14);
+
+  // Add validation for RSI data
+  if (!rsiHighs || rsiHighs.length < 14) return null;
+
+  const priceSlope = calculateSlope(priceHighs);
+  const rsiSlope = calculateSlope(rsiHighs);
+  
+  return (priceSlope > 0 && rsiSlope < 0) ? 'bearish_divergence' 
+       : (priceSlope < 0 && rsiSlope > 0) ? 'bullish_divergence' 
+       : null;
 }
 
 // Helper function to determine direction from patterns
@@ -1329,7 +1576,7 @@ function determinePatternDirection(patterns) {
   if (patterns.doubleTops?.doubleBottom) patternScore += 0.5;
   if (patterns.tripleTops?.tripleBottom) patternScore += 0.5;
   if (patterns.islandReversals?.islandReversal && patterns.islandReversals?.direction === 'bullish') patternScore += 0.5;
-  
+
   // Check for specific bearish patterns
   if (patterns.headAndShoulders?.found) patternScore -= 1;
   if (patterns.bearishFlag?.found) patternScore -= 1;
@@ -1338,7 +1585,7 @@ function determinePatternDirection(patterns) {
   if (patterns.doubleTops?.doubleTop) patternScore -= 0.5;
   if (patterns.tripleTops?.tripleTop) patternScore -= 0.5;
   if (patterns.islandReversals?.islandReversal && patterns.islandReversals?.direction === 'bearish') patternScore -= 0.5;
-  
+
   // Normalize the score to be between -1 and 1
   const maxPossibleScore = 4; // Reasonable maximum based on the checks above
   return patternScore / maxPossibleScore;
