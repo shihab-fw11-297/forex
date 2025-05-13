@@ -1,6 +1,6 @@
 const express = require('express');
 const app = express();
-const port = 3000;
+const port = 3100;
 const axios = require("axios");
 const technicalIndicators = require("technicalindicators");
 const fs = require("fs/promises");
@@ -1398,7 +1398,7 @@ async function performFullAnalysis() {
 
     // 2. Unified Indicator Calculation
     const indicators = {
-      primary: calculateIndicators(data['5m']),
+      primary: calculateIndicators(data['3m']),
       secondary: {
         '2m': calculateIndicators(data['2m']),
         '3m': calculateIndicators(data['3m']),
@@ -1410,7 +1410,7 @@ async function performFullAnalysis() {
     };
 
     // 3. Enhanced Pattern Detection
-    const patterns = identifyAdvancedPatterns(data['1h']);
+    const patterns = identifyAdvancedPatterns(data['15m']);
 
     const patternDirection = determinePatternDirection(patterns)
   
