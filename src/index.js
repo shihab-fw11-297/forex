@@ -7,7 +7,7 @@ const { SMA, EMA, RSI, MACD, ATR, BollingerBands, Stochastic } = technicalIndica
 
 const PORT = process.env.PORT || 3100;
 const API_KEY = process.env.API_KEY || 'API_KEY43K5X8SPEB505UUI124BX3MSKVFNNTWI'; // Replace with actual key
-const SYMBOL = 'cadjpy';
+const SYMBOL = 'xauusd';
 const TIMEFRAME = '5m';
 
 // Cache and schedule variables
