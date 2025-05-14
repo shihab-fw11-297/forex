@@ -694,6 +694,7 @@ async function initialize() {
       }, nextRefreshDelay);
     };
 
+    
     startRefreshTimer();
     
     // Handle graceful shutdown
@@ -703,7 +704,12 @@ async function initialize() {
         console.log('Server closed');
         process.exit(0);
       });
-    } catch (err) {
-      console. log(err);
+    });
+
+  } catch (error) {
+    console.error('Initialization failed:', error);
+    process.exit(1);
   }
 }
+
+initialize();
