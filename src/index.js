@@ -7,8 +7,8 @@ const { SMA, EMA, RSI, MACD, ATR, BollingerBands, Stochastic } = technicalIndica
 
 const PORT = process.env.PORT || 3100;
 const API_KEY = process.env.API_KEY || 'API_KEY43K5X8SPEB505UUI124BX3MSKVFNNTWI'; // Replace with actual key
-const SYMBOL = 'GBPCAD';
-const TIMEFRAME = '3m';
+const SYMBOL = 'audjpy';
+const TIMEFRAME = '2m';
 
 // Cache and schedule variables
 let lastSignal = null;
@@ -36,7 +36,7 @@ async function fetch5MinData() {
     const from = moment(now).subtract(5, 'days').format('YYYY-MM-DD'); // Clone before subtract
     const defaultEnd = moment(now).add(2, 'days').format('YYYY-MM-DD'); // Add 2 days to original
     
-    const url = `https://api.finage.co.uk/agg/forex/${SYMBOL}/3/minute/${from}/${defaultEnd}?apikey=${API_KEY}&limit=1500`;
+    const url = `https://api.finage.co.uk/agg/forex/${SYMBOL}/2/minute/${from}/${defaultEnd}?apikey=${API_KEY}&limit=1500`;
     
     const response = await axios.get(url, { timeout: 10000 });
     
