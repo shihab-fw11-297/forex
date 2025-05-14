@@ -703,3 +703,7 @@ async function initialize() {
         console.log('Server closed');
         process.exit(0);
       });
+    } catch (err) {
+      console. log(err);
+  }
+}
