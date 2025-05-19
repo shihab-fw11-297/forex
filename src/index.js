@@ -6,7 +6,7 @@ const technicalIndicators = require("technicalindicators");
 const fs = require("fs/promises");
 const moment = require("moment");
 const BASE_URL = "https://api.finage.co.uk";
-const api = ["API_KEY43K5X8SPEB505UUI124BX3MSKVFNNTWI"]
+const api = ["API_KEYe2VNEZEN33ZTJHK78SV3NTRAT66I85FL"]
 const cache = {};
 // Random API Key Selector
 function getRandomApiKey() {
