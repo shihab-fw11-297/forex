@@ -12,7 +12,7 @@ const CONFIG = {
   BASE_URL: "https://api.finage.co.uk",
   DEFAULT_SYMBOL: "EURUSD",
 
-  // Multi-Timeframe Configuration
+  // Multi-Timeframe Configuration test
   TIMEFRAMES: {
     HIGHER: { interval: "hour", multiplier: 1, name: "1H", priority: "TREND" },
     MEDIUM: {
