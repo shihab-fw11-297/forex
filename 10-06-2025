@@ -2,17 +2,17 @@ const express = require("express");
 const axios = require("axios");
 const moment = require("moment");
 const TI = require("technicalindicators");
+var cors = require("cors");
 
 const app = express();
-const PORT = 3000;
+const PORT = 3100;
 
-// Configuration with Multiple Timeframes
+// Enhanced Configuration with currency-specific settings
 const CONFIG = {
-  FINAGE_API_KEY: "API_KEYeeVHLBVRLK4R8RVY8NHZ48S5RQZE8ZTD",
+  FINAGE_API_KEY: "API_KEYc3ZJL328BTEHL2RJR6HVFZHIXLCN8MPD",
   BASE_URL: "https://api.finage.co.uk",
   DEFAULT_SYMBOL: "EURUSD",
 
-  // Multi-Timeframe Configuration test
   TIMEFRAMES: {
     HIGHER: { interval: "hour", multiplier: 1, name: "1H", priority: "TREND" },
     MEDIUM: {
@@ -30,12 +30,6 @@ const CONFIG = {
     },
   },
 
-  // Support/Resistance Parameters
-  PIVOT_LOOKBACK: 50,  // Candles to analyze for pivot points
-  SR_DISTANCE_FACTOR: 0.002,  // 0.2% of price for SR zone
-  REVERSAL_CONFIRMATION: 3,  // Candles for reversal confirmation
-
-
   // Technical Analysis Parameters
   ATR_PERIOD: 14,
   RSI_PERIOD: 14,
@@ -50,309 +44,172 @@ const CONFIG = {
   ADX_PERIOD: 14,
   STOCH_K_PERIOD: 14,
   STOCH_D_PERIOD: 3,
-  CCI_PERIOD: 20,
-  WILLIAMS_R_PERIOD: 14,
+  VOLUME_LOOKBACK: 10,
 
-  // Multi-Timeframe Weights
   TIMEFRAME_WEIGHTS: {
-    HIGHER: 0.4, // 40% weight for trend
-    MEDIUM: 0.3, // 30% weight for structure
-    LOWER: 0.2, // 20% weight for entry
-    SCALP: 0.1, // 10% weight for execution timing
+    HIGHER: 0.4,
+    MEDIUM: 0.3,
+    LOWER: 0.2,
+    SCALP: 0.1,
+  },
+
+  // Pattern Recognition Thresholds
+  VOLUME_SPIKE_THRESHOLD: 1.8,
+  BB_SQUEEZE_THRESHOLD: 0.008,
+  DIVERGENCE_LOOKBACK: 5,
+  MIN_CONFIDENCE: 65,
+  MAX_TRADE_DURATION: 4, // minutes
+
+  // Currency-specific settings
+  CURRENCY_SETTINGS: {
+    JPY: {
+      reversalThreshold: 0.7,
+      volatilityMultiplier: 1.4,
+      rsiThreshold: 75,
+    },
+    EMERGING: {
+      reversalThreshold: 0.6,
+      volatilityMultiplier: 1.8,
+      rsiThreshold: 80,
+    },
+    DEFAULT: {
+      reversalThreshold: 0.4,
+      volatilityMultiplier: 1.0,
+      rsiThreshold: 70,
+    },
   },
 };
 
+// Helper function to get currency settings
+function getCurrencySettings(symbol) {
+  if (symbol.includes("JPY")) return CONFIG.CURRENCY_SETTINGS.JPY;
+  if (["MXN", "TRY", "ZAR", "BRL"].some((c) => symbol.includes(c)))
+    return CONFIG.CURRENCY_SETTINGS.EMERGING;
+  return CONFIG.CURRENCY_SETTINGS.DEFAULT;
+}
 
-
-// Enhanced Technical Analysis using technicalindicators package
-class EnhancedTechnicalAnalysis {
+class TechnicalAnalysis {
   static prepareCandleData(data) {
     return {
       open: data.map((d) => d.o),
       high: data.map((d) => d.h),
       low: data.map((d) => d.l),
       close: data.map((d) => d.c),
-      volume: data.map((d) => d.v || 1000), // Use volume if available, otherwise default
+      volume: data.map((d) => d.v || 1000),
+      timestamp: data.map((d) => d.t),
     };
   }
 
-  // NEW: Support/Resistance Analysis
-  static findSupportResistance(data) {
-    if (data.length < CONFIG.PIVOT_LOOKBACK) return { support: [], resistance: [] };
+  // Detect 12 most reliable candlestick patterns
+  static detectCandlestickPatterns(data) {
+    if (data.length < 5) return [];
 
-    const pivotPoints = [];
-    const swingPoints = [];
-    const srZones = { support: [], resistance: [] };
+    const patterns = [];
+    const lastCandle = data[data.length - 1];
+    const prevCandle = data[data.length - 2];
+    const secondPrev = data[data.length - 3];
 
-    // Identify swing highs and lows
-    for (let i = 3; i < data.length - 3; i++) {
-      // Swing High detection
-      if (
-        data[i].h > data[i - 1].h &&
-        data[i].h > data[i - 2].h &&
-        data[i].h > data[i + 1].h &&
-        data[i].h > data[i + 2].h
-      ) {
-        swingPoints.push({ type: "resistance", price: data[i].h });
-      }
+    // Bullish Patterns
+    if (
+      TI.bullishhammerstick({
+        open: [lastCandle.o],
+        high: [lastCandle.h],
+        low: [lastCandle.l],
+        close: [lastCandle.c],
+      })
+    )
+      patterns.push("BULLISH_HAMMER");
 
-      // Swing Low detection
-      if (
-        data[i].l < data[i - 1].l &&
-        data[i].l < data[i - 2].l &&
-        data[i].l < data[i + 1].l &&
-        data[i].l < data[i + 2].l
-      ) {
-        swingPoints.push({ type: "support", price: data[i].l });
-      }
+    if (
+      TI.bullishengulfingpattern({
+        open: [prevCandle.o, lastCandle.o],
+        close: [prevCandle.c, lastCandle.c],
+        high: [prevCandle.h, lastCandle.h],
+        low: [prevCandle.l, lastCandle.l],
+      })
+    )
+      patterns.push("BULLISH_ENGULFING");
+
+    if (
+      TI.morningstar({
+        open: [secondPrev.o, prevCandle.o, lastCandle.o],
+        close: [secondPrev.c, prevCandle.c, lastCandle.c],
+        high: [secondPrev.h, prevCandle.h, lastCandle.h],
+        low: [secondPrev.l, prevCandle.l, lastCandle.l],
+      })
+    )
+      patterns.push("MORNING_STAR");
+
+    // Bearish Patterns
+    if (
+      TI.bearishhammerstick({
+        open: [lastCandle.o],
+        high: [lastCandle.h],
+        low: [lastCandle.l],
+        close: [lastCandle.c],
+      })
+    )
+      patterns.push("BEARISH_HAMMER");
+
+    if (
+      TI.bearishengulfingpattern({
+        open: [prevCandle.o, lastCandle.o],
+        close: [prevCandle.c, lastCandle.c],
+        high: [prevCandle.h, lastCandle.h],
+        low: [prevCandle.l, lastCandle.l],
+      })
+    )
+      patterns.push("BEARISH_ENGULFING");
+
+    if (
+      TI.eveningstar({
+        open: [secondPrev.o, prevCandle.o, lastCandle.o],
+        close: [secondPrev.c, prevCandle.c, lastCandle.c],
+        high: [secondPrev.h, prevCandle.h, lastCandle.h],
+        low: [secondPrev.l, prevCandle.l, lastCandle.l],
+      })
+    )
+      patterns.push("EVENING_STAR");
+
+    // Price Action Patterns
+    const last5 = data.slice(-5);
+    let higherHighs = 0;
+    let lowerLows = 0;
+
+    for (let i = 1; i < last5.length; i++) {
+      if (last5[i].h > last5[i - 1].h) higherHighs++;
+      if (last5[i].l < last5[i - 1].l) lowerLows++;
     }
 
-    // Cluster nearby points into zones
-    const clusterPoints = (points, type) => {
-      const clusters = [];
-      points.sort((a, b) => a.price - b.price);
+    if (higherHighs >= 3 && lowerLows >= 3) patterns.push("STRONG_UPTREND");
+    if (higherHighs <= 1 && lowerLows <= 1) patterns.push("CONSOLIDATION");
 
-      let currentCluster = [];
-      for (const point of points) {
-        if (currentCluster.length === 0) {
-          currentCluster.push(point.price);
-        } else {
-          const lastPrice = currentCluster[currentCluster.length - 1];
-          if (Math.abs(point.price - lastPrice) / lastPrice <= CONFIG.SR_DISTANCE_FACTOR) {
-            currentCluster.push(point.price);
-          } else {
-            clusters.push(currentCluster);
-            currentCluster = [point.price];
-          }
-        }
-      }
-      if (currentCluster.length > 0) clusters.push(currentCluster);
+    // Detect pin bars
+    const upperTail = lastCandle.h - Math.max(lastCandle.o, lastCandle.c);
+    const lowerTail = Math.min(lastCandle.o, lastCandle.c) - lastCandle.l;
+    const body = Math.abs(lastCandle.o - lastCandle.c);
 
-      return clusters.map(cluster => {
-        const avg = cluster.reduce((sum, val) => sum + val, 0) / cluster.length;
-        return {
-          price: avg,
-          strength: cluster.length,
-          type
-        };
-      });
-    };
+    if (upperTail > body * 2 && lowerTail < body * 0.5) {
+      patterns.push("BEARISH_PINBAR");
+    }
+    if (lowerTail > body * 2 && upperTail < body * 0.5) {
+      patterns.push("BULLISH_PINBAR");
+    }
 
-    // Get support and resistance clusters
-    srZones.support = clusterPoints(
-      swingPoints.filter(p => p.type === "support"),
-      "support"
-    );
-    srZones.resistance = clusterPoints(
-      swingPoints.filter(p => p.type === "resistance"),
-      "resistance"
-    );
-
-    // Sort by strength and proximity to current price
-    const currentPrice = data[data.length - 1].c;
-    srZones.support.sort((a, b) => {
-      const strengthDiff = b.strength - a.strength;
-      if (strengthDiff !== 0) return strengthDiff;
-      return Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice);
-    });
-
-    srZones.resistance.sort((a, b) => {
-      const strengthDiff = b.strength - a.strength;
-      if (strengthDiff !== 0) return strengthDiff;
-      return Math.abs(a.price - currentPrice) - Math.abs(b.price - currentPrice);
-    });
-
-    return srZones;
+    return patterns;
   }
 
-  // NEW: Reversal Point Detection
-  static detectReversalPoints(data, indicators, srZones) {
-    if (data.length < 5) return { reversalSignal: "NONE", reversalStrength: 0 };
-
-    const currentPrice = data[data.length - 1].c;
-    const previousPrice = data[data.length - 2].c;
-    const trendDirection = currentPrice > previousPrice ? "UP" : "DOWN";
-
-    let reversalSignal = "NONE";
-    let reversalStrength = 0;
-
-    // 1. Check Divergence
-    const rsiDivergence = this.checkRSIDivergence(data, indicators.rsi);
-    const macdDivergence = this.checkMACDDivergence(data, indicators.macd);
-
-    if (rsiDivergence || macdDivergence) {
-      reversalStrength += 0.4;
-      reversalSignal = rsiDivergence === "BULLISH" || macdDivergence === "BULLISH"
-        ? "BULLISH_REVERSAL"
-        : "BEARISH_REVERSAL";
-    }
-
-    // 2. Check Support/Resistance Break
-    const srBreak = this.checkSRBreak(data, srZones);
-    if (srBreak) {
-      reversalStrength += 0.3;
-      reversalSignal = srBreak.direction === "BREAKOUT"
-        ? "BULLISH_REVERSAL"
-        : "BEARISH_REVERSAL";
-    }
-
-    // 3. Candlestick Patterns
-    const patterns = this.analyzeCandlestickPatterns(data.slice(-5));
-    if (patterns.signal !== "NEUTRAL") {
-      reversalStrength += patterns.strength * 0.3;
-      if (patterns.signal === "BULLISH" && trendDirection === "DOWN") {
-        reversalSignal = "BULLISH_REVERSAL";
-      } else if (patterns.signal === "BEARISH" && trendDirection === "UP") {
-        reversalSignal = "BEARISH_REVERSAL";
-      }
-    }
-
-    // 4. Volume Confirmation
-    const volumeSpike = data[data.length - 1].v > data[data.length - 2].v * 1.5;
-    if (volumeSpike && reversalStrength > 0.5) {
-      reversalStrength = Math.min(1, reversalStrength + 0.2);
-    }
-
-    return {
-      reversalSignal,
-      reversalStrength,
-      triggers: {
-        rsiDivergence,
-        macdDivergence,
-        srBreak,
-        candlestick: patterns.signal
-      }
-    };
-  }
-
-  static checkRSIDivergence(data, rsi) {
-    if (!rsi || rsi.length < 14) return null;
-
-    const prices = data.map(d => d.c);
-    const lastIndex = prices.length - 1;
-
-    // Bullish Divergence (price makes lower low, RSI makes higher low)
-    if (
-      prices[lastIndex] < prices[lastIndex - 2] &&
-      rsi[rsi.length - 1] > rsi[rsi.length - 3] &&
-      rsi[rsi.length - 1] < 40
-    ) {
-      return "BULLISH";
-    }
-
-    // Bearish Divergence (price makes higher high, RSI makes lower high)
-    if (
-      prices[lastIndex] > prices[lastIndex - 2] &&
-      rsi[rsi.length - 1] < rsi[rsi.length - 3] &&
-      rsi[rsi.length - 1] > 60
-    ) {
-      return "BEARISH";
-    }
-
-    return null;
-  }
-
-  static checkMACDDivergence(data, macd) {
-    if (!macd || macd.length < 5) return null;
-
-    const prices = data.map(d => d.c);
-    const lastIndex = prices.length - 1;
-    const macdValues = macd.map(m => m.MACD);
-    const signalValues = macd.map(m => m.signal);
-
-    // Bullish Divergence
-    if (
-      prices[lastIndex] < prices[lastIndex - 4] &&
-      macdValues[macdValues.length - 1] > macdValues[macdValues.length - 5] &&
-      signalValues[signalValues.length - 1] > signalValues[signalValues.length - 5]
-    ) {
-      return "BULLISH";
-    }
-
-    // Bearish Divergence
-    if (
-      prices[lastIndex] > prices[lastIndex - 4] &&
-      macdValues[macdValues.length - 1] < macdValues[macdValues.length - 5] &&
-      signalValues[signalValues.length - 1] < signalValues[signalValues.length - 5]
-    ) {
-      return "BEARISH";
-    }
-
-    return null;
-  }
-
-  static checkSRBreak(data, srZones) {
-    if (data.length < 3 || !srZones || srZones.support.length === 0 || srZones.resistance.length === 0)
-      return null;
-
-    const current = data[data.length - 1];
-    const previous = data[data.length - 2];
-    const currentPrice = current.c;
-
-    // Find nearest significant SR levels
-    const nearestSupport = srZones.support[0]?.price;
-    const nearestResistance = srZones.resistance[0]?.price;
-
-    // Check resistance break
-    if (
-      nearestResistance &&
-      previous.c < nearestResistance &&
-      currentPrice > nearestResistance &&
-      current.h - current.l < (currentPrice * 0.002) // Small wick for breakout
-    ) {
-      return { type: "RESISTANCE_BREAK", direction: "BREAKOUT", level: nearestResistance };
-    }
-
-    // Check support break
-    if (
-      nearestSupport &&
-      previous.c > nearestSupport &&
-      currentPrice < nearestSupport &&
-      current.h - current.l < (currentPrice * 0.002) // Small wick for breakdown
-    ) {
-      return { type: "SUPPORT_BREAK", direction: "BREAKDOWN", level: nearestSupport };
-    }
-
-    // Check rejection
-    if (
-      nearestResistance &&
-      Math.abs(current.h - nearestResistance) < (currentPrice * CONFIG.SR_DISTANCE_FACTOR) &&
-      current.c < current.o && // Bearish candle
-      (current.h - current.c) > (2 * (current.c - current.l)) // Upper wick
-    ) {
-      return { type: "RESISTANCE_REJECTION", direction: "REVERSAL", level: nearestResistance };
-    }
-
-    if (
-      nearestSupport &&
-      Math.abs(current.l - nearestSupport) < (currentPrice * CONFIG.SR_DISTANCE_FACTOR) &&
-      current.c > current.o && // Bullish candle
-      (current.c - current.l) > (2 * (current.h - current.c)) // Lower wick
-    ) {
-      return { type: "SUPPORT_BOUNCE", direction: "REVERSAL", level: nearestSupport };
-    }
-
-    return null;
-  }
-  
   static calculateAllIndicators(data) {
     const candleData = this.prepareCandleData(data);
     const { open, high, low, close, volume } = candleData;
 
-    if (close.length < CONFIG.EMA_TREND) {
-      return null;
-    }
+    if (close.length < CONFIG.EMA_TREND) return null;
 
     try {
-      return {
-        // Moving Averages
-        sma20: TI.SMA.calculate({ period: 20, values: close }),
-        sma50: TI.SMA.calculate({ period: 50, values: close }),
+      const indicators = {
         ema20: TI.EMA.calculate({ period: CONFIG.EMA_FAST, values: close }),
         ema50: TI.EMA.calculate({ period: CONFIG.EMA_SLOW, values: close }),
         ema200: TI.EMA.calculate({ period: CONFIG.EMA_TREND, values: close }),
-
-        // Oscillators
         rsi: TI.RSI.calculate({ period: CONFIG.RSI_PERIOD, values: close }),
         macd: TI.MACD.calculate({
           fastPeriod: CONFIG.MACD_FAST,
@@ -367,14 +224,6 @@ class EnhancedTechnicalAnalysis {
           period: CONFIG.STOCH_K_PERIOD,
           signalPeriod: CONFIG.STOCH_D_PERIOD,
         }),
-        williamsR: TI.WilliamsR.calculate({
-          high: high,
-          low: low,
-          close: close,
-          period: CONFIG.WILLIAMS_R_PERIOD,
-        }),
-
-        // Volatility Indicators
         atr: TI.ATR.calculate({
           high: high,
           low: low,
@@ -386,178 +235,68 @@ class EnhancedTechnicalAnalysis {
           values: close,
           stdDev: CONFIG.BB_STDDEV,
         }),
-
-        // Trend Indicators
         adx: TI.ADX.calculate({
           high: high,
           low: low,
           close: close,
           period: CONFIG.ADX_PERIOD,
         }),
-        cci: TI.CCI.calculate({
-          high: high,
-          low: low,
-          close: close,
-          period: CONFIG.CCI_PERIOD,
-        }),
-
-        // Volume Indicators
-        obv: TI.OBV.calculate({
-          close: close,
-          volume: volume,
-        }),
-        mfi: TI.MFI.calculate({
-          high: high,
-          low: low,
-          close: close,
-          volume: volume,
-          period: 14,
-        }),
-
-        // Momentum Indicators
-        roc: TI.ROC.calculate({
-          values: close,
-          period: 12,
-        }),
-        ao: TI.AwesomeOscillator.calculate({
-          high: high,
-          low: low,
-          fastPeriod: 5,
-          slowPeriod: 34,
-        }),
+        volume: volume,
       };
+
+      // Volume spike detection
+      const volumeLookback = Math.min(
+        CONFIG.VOLUME_LOOKBACK,
+        indicators.volume.length
+      );
+      const recentVolumes = indicators.volume.slice(-volumeLookback);
+      const volumeAvg =
+        recentVolumes.reduce((sum, vol) => sum + vol, 0) / recentVolumes.length;
+      const currentVolume = indicators.volume[indicators.volume.length - 1];
+      indicators.volumeSpike =
+        currentVolume > volumeAvg * CONFIG.VOLUME_SPIKE_THRESHOLD;
+
+      // Volume direction
+      const currentPrice = close[close.length - 1];
+      const prevPrice = close[close.length - 2];
+      indicators.volumeDirection =
+        currentPrice > prevPrice ? "BULLISH" : "BEARISH";
+
+      return indicators;
     } catch (error) {
       console.error("Error calculating indicators:", error.message);
       return null;
     }
   }
 
-  static analyzeCandlestickPatterns(data) {
-    if (data.length < 5)
-      return { patterns: [], signal: "NEUTRAL", strength: 0 };
-
-    const candleData = this.prepareCandleData(data);
-    const { open, high, low, close } = candleData;
-
-    const patterns = [];
-    let bullishCount = 0;
-    let bearishCount = 0;
-
-    try {
-      // Major Reversal Patterns
-      const doji = TI.doji({ open, high, low, close });
-      const hammer = TI.bullishhammer({ open, high, low, close });
-      const shootingStar = TI.shootingstar({ open, high, low, close });
-      const engulfingBull = TI.bullishengulfingpattern({
-        open,
-        high,
-        low,
-        close,
-      });
-      const engulfingBear = TI.bearishengulfingpattern({
-        open,
-        high,
-        low,
-        close,
-      });
-      const harami = TI.bullishharami({ open, high, low, close });
-      const bearishHarami = TI.bearishharami({ open, high, low, close });
-      const morningStar = TI.morningstar({ open, high, low, close });
-      const eveningStar = TI.eveningstar({ open, high, low, close });
-      const hangingMan = TI.hangingman({ open, high, low, close });
-      const darkCloudCover = TI.darkcloudcover({ open, high, low, close });
-      const piercingLine = TI.piercingline({ open, high, low, close });
-
-      // Check recent patterns (last few candles)
-      const checkRecent = (pattern, name, type) => {
-        if (pattern && pattern.length > 0) {
-          const recent = pattern.slice(-3); // Check last 3 signals
-          if (recent.some((val) => val === true)) {
-            patterns.push({ name, type, strength: 0.7 });
-            if (type === "BULLISH") bullishCount++;
-            else bearishCount++;
-          }
-        }
-      };
-
-      // Analyze patterns
-      checkRecent(doji, "Doji", "NEUTRAL");
-      checkRecent(hammer, "Bullish Hammer", "BULLISH");
-      checkRecent(shootingStar, "Shooting Star", "BEARISH");
-      checkRecent(engulfingBull, "Bullish Engulfing", "BULLISH");
-      checkRecent(engulfingBear, "Bearish Engulfing", "BEARISH");
-      checkRecent(harami, "Bullish Harami", "BULLISH");
-      checkRecent(bearishHarami, "Bearish Harami", "BEARISH");
-      checkRecent(morningStar, "Morning Star", "BULLISH");
-      checkRecent(eveningStar, "Evening Star", "BEARISH");
-      checkRecent(hangingMan, "Hanging Man", "BEARISH");
-      checkRecent(darkCloudCover, "Dark Cloud Cover", "BEARISH");
-      checkRecent(piercingLine, "Piercing Line", "BULLISH");
-    } catch (error) {
-      console.log(
-        "Some candlestick patterns failed to calculate:",
-        error.message
-      );
-    }
-
-    // Determine overall signal
-    let signal = "NEUTRAL";
-    let strength = 0;
-
-    if (bullishCount > bearishCount && bullishCount > 0) {
-      signal = "BULLISH";
-      strength = Math.min(1, bullishCount / 3);
-    } else if (bearishCount > bullishCount && bearishCount > 0) {
-      signal = "BEARISH";
-      strength = Math.min(1, bearishCount / 3);
-    }
-
-    return { patterns, signal, strength };
-  }
-
-  static generateTechnicalScore(indicators, patterns) {
+  static generateTechnicalScore(
+    indicators,
+    data,
+    mainDirection,
+    currencySettings
+  ) {
     if (!indicators) return 0;
 
     let score = 0;
     let weight = 0;
 
-    // RSI Analysis (Oversold/Overbought)
+    // RSI Analysis with currency-specific thresholds
     const currentRSI = indicators.rsi[indicators.rsi.length - 1];
     if (currentRSI < 30) {
-      score += 20; // Oversold - bullish
-    } else if (currentRSI > 70) {
-      score -= 20; // Overbought - bearish
+      score += 20;
+    } else if (currentRSI > currencySettings.rsiThreshold) {
+      score -= 20;
     }
     weight += 20;
 
     // MACD Analysis
     const currentMACD = indicators.macd[indicators.macd.length - 1];
     if (currentMACD && currentMACD.MACD > currentMACD.signal) {
-      score += 15; // MACD above signal - bullish
+      score += 15;
     } else if (currentMACD && currentMACD.MACD < currentMACD.signal) {
-      score -= 15; // MACD below signal - bearish
+      score -= 15;
     }
     weight += 15;
-
-    // ADX Trend Strength
-    const currentADX = indicators.adx[indicators.adx.length - 1];
-    if (currentADX && currentADX.adx > 25) {
-      // Strong trend - amplify other signals
-      score *= 1.2;
-    }
-
-    // Bollinger Bands Position
-    const currentBB =
-      indicators.bollingerBands[indicators.bollingerBands.length - 1];
-    const currentPrice = indicators.ema20[indicators.ema20.length - 1]; // Use latest price proxy
-    if (currentBB) {
-      if (currentPrice < currentBB.lower) {
-        score += 10; // Below lower band - potential bullish
-      } else if (currentPrice > currentBB.upper) {
-        score -= 10; // Above upper band - potential bearish
-      }
-    }
-    weight += 10;
 
     // EMA Alignment
     const ema20 = indicators.ema20[indicators.ema20.length - 1];
@@ -565,42 +304,99 @@ class EnhancedTechnicalAnalysis {
     const ema200 = indicators.ema200[indicators.ema200.length - 1];
 
     if (ema20 > ema50 && ema50 > ema200) {
-      score += 25; // Bullish alignment
+      score += 25;
     } else if (ema20 < ema50 && ema50 < ema200) {
-      score -= 25; // Bearish alignment
+      score -= 25;
     }
     weight += 25;
 
-    // Candlestick Pattern Weight
-    if (patterns.signal === "BULLISH") {
-      score += 15 * patterns.strength;
-    } else if (patterns.signal === "BEARISH") {
-      score -= 15 * patterns.strength;
+    // Volume Analysis with direction confirmation
+    if (indicators.volumeSpike) {
+      if (
+        mainDirection === "LONG" &&
+        indicators.volumeDirection === "BULLISH"
+      ) {
+        score += 20; // Bonus for aligned volume spike
+      } else if (
+        mainDirection === "SHORT" &&
+        indicators.volumeDirection === "BEARISH"
+      ) {
+        score -= 20;
+      }
+    }
+    weight += 20;
+
+    // Stochastic Confirmation
+    const currentStoch = indicators.stoch[indicators.stoch.length - 1];
+    if (currentStoch && currentStoch.k < 20 && currentStoch.d < 20) {
+      score += 15;
+    } else if (currentStoch && currentStoch.k > 80 && currentStoch.d > 80) {
+      score -= 15;
     }
     weight += 15;
 
-    // Normalize score to -100 to +100 range
+    // Candlestick Pattern Recognition
+    const patterns = this.detectCandlestickPatterns(data);
+    const bullishPatterns = [
+      "BULLISH_HAMMER",
+      "BULLISH_ENGULFING",
+      "MORNING_STAR",
+      "BULLISH_PINBAR",
+    ];
+    const bearishPatterns = [
+      "BEARISH_HAMMER",
+      "BEARISH_ENGULFING",
+      "EVENING_STAR",
+      "BEARISH_PINBAR",
+    ];
+
+    patterns.forEach((pattern) => {
+      if (bullishPatterns.includes(pattern)) {
+        score += 10;
+        weight += 10;
+      } else if (bearishPatterns.includes(pattern)) {
+        score -= 10;
+        weight += 10;
+      }
+    });
+
+    // EMA Distance Factor
+    const currentPrice = data[data.length - 1].c;
+    const emaDistance = (currentPrice - ema20) / (ema50 - ema20);
+    if (emaDistance > 0.3) {
+      score += 10;
+    } else if (emaDistance < -0.3) {
+      score -= 10;
+    }
+    weight += 10;
+
+    // Bollinger Band Squeeze Detection
+    const currentBB =
+      indicators.bollingerBands[indicators.bollingerBands.length - 1];
+    const bbWidth = (currentBB.upper - currentBB.lower) / currentPrice;
+    if (bbWidth < CONFIG.BB_SQUEEZE_THRESHOLD) {
+      patterns.push("BB_SQUEEZE");
+      // Boost signal during volatility contractions
+      score = score * 1.25;
+    }
+
     return weight > 0
       ? Math.max(-100, Math.min(100, (score / weight) * 100))
       : 0;
   }
 }
 
-// Enhanced Multi-Timeframe Analysis
 class MultiTimeframeAnalysis {
-  // UPDATED: Identify Trend with reversal awareness
-  static identifyTrend(indicators, patterns, srAnalysis, timeframeName) {
-    if (!indicators) return { trend: "SIDEWAYS", strength: 0, reversalRisk: 0 };
+  static identifyTrend(indicators) {
+    if (!indicators) return { trend: "SIDEWAYS", strength: 0 };
 
     let trendScore = 0;
     let signals = 0;
-    let reversalRisk = 0;
 
     // EMA Trend Analysis
     const ema20 = indicators.ema20[indicators.ema20.length - 1];
     const ema50 = indicators.ema50[indicators.ema50.length - 1];
     const ema200 = indicators.ema200[indicators.ema200.length - 1];
-    const currentPrice = indicators.currentPrice;
 
     if (ema20 > ema50 && ema50 > ema200) {
       trendScore += 3;
@@ -608,13 +404,6 @@ class MultiTimeframeAnalysis {
       trendScore -= 3;
     }
     signals += 3;
-
-    // Check for reversal signals near SR levels
-    if (srAnalysis && srAnalysis.reversalSignal !== "NONE") {
-      reversalRisk = srAnalysis.reversalStrength;
-      // Reduce trend strength if reversal is likely
-      trendScore *= (1 - reversalRisk);
-    }
 
     // ADX Trend Strength
     const currentADX = indicators.adx[indicators.adx.length - 1];
@@ -641,129 +430,312 @@ class MultiTimeframeAnalysis {
       signals += 2;
     }
 
-    // Determine trend
     let trend = "SIDEWAYS";
     let strength = 0;
 
     if (signals > 0) {
       const trendRatio = trendScore / signals;
-      strength = Math.abs(trendRatio) * 100 * (1 - reversalRisk);
+      strength = Math.abs(trendRatio) * 100;
 
-      if (trendRatio > 0.2) {
+      if (trendRatio > 0.3) {
         trend = "UPTREND";
-      } else if (trendRatio < -0.2) {
+      } else if (trendRatio < -0.3) {
         trend = "DOWNTREND";
       }
     }
 
-    return { trend, strength, reversalRisk };
+    return { trend, strength };
   }
 
-  // UPDATED: Analyze Timeframe Alignment with reversal awareness
-  static analyzeTimeframeAlignment(timeframeData) {
+  static analyzeTimeframeAlignment(timeframeData, symbol) {
     const alignment = {
       bullishCount: 0,
       bearishCount: 0,
       totalWeight: 0,
       weightedScore: 0,
       confluence: "NONE",
-      reversalRisks: [],
+      volumeMomentum: "NEUTRAL",
+      orderFlow: { largeBlocks: 0, absorption: 0 },
     };
 
+    const currencySettings = getCurrencySettings(symbol);
+    const now = moment();
+
+    // 1. Dynamic Weighting System - Prioritize recent and volatile signals
     Object.keys(timeframeData).forEach((tf) => {
       const data = timeframeData[tf];
       if (data.analysis && data.analysis.trend) {
         const weight = CONFIG.TIMEFRAME_WEIGHTS[tf.toUpperCase()] || 0.1;
         alignment.totalWeight += weight;
-        const reversalRisk = data.analysis.reversalRisk || 0;
-        alignment.reversalRisks.push(reversalRisk);
+
+        // Recency factor (data less than 10 minutes old gets 1.5x boost)
+        const minutesOld = now.diff(moment(data.timestamp), "minutes");
+        const recencyFactor = minutesOld < 10 ? 1.5 : 1;
+
+        // Volatility factor (higher ATR = stronger signal weight)
+        const volatilityFactor =
+          1 + data.indicators.atr / data.indicators.currentPrice;
+
+        const weightedStrength =
+          data.analysis.strength * recencyFactor * volatilityFactor;
 
         if (data.analysis.trend === "UPTREND") {
           alignment.bullishCount++;
-          alignment.weightedScore += weight * data.analysis.strength * (1 - reversalRisk);
+          alignment.weightedScore += weight * weightedStrength;
         } else if (data.analysis.trend === "DOWNTREND") {
           alignment.bearishCount++;
-          alignment.weightedScore -= weight * data.analysis.strength * (1 - reversalRisk);
+          alignment.weightedScore -= weight * weightedStrength;
         }
       }
     });
 
-    // Calculate overall reversal risk
-    const avgReversalRisk = alignment.reversalRisks.length > 0
-      ? alignment.reversalRisks.reduce((a, b) => a + b, 0) / alignment.reversalRisks.length
-      : 0;
-
-    // Determine confluence
     const totalTimeframes = Object.keys(timeframeData).length;
-    if (alignment.bullishCount >= totalTimeframes * 0.7) {
-      alignment.confluence = avgReversalRisk > 0.4 ? "BULLISH_WEAK" : "BULLISH_STRONG";
-    } else if (alignment.bearishCount >= totalTimeframes * 0.7) {
-      alignment.confluence = avgReversalRisk > 0.4 ? "BEARISH_WEAK" : "BEARISH_STRONG";
+
+    // 2. Enhanced Confluence Logic
+    if (alignment.bullishCount === totalTimeframes) {
+      alignment.confluence = "PERFECT_BULLISH";
+    } else if (alignment.bearishCount === totalTimeframes) {
+      alignment.confluence = "PERFECT_BEARISH";
+    } else if (alignment.bullishCount >= totalTimeframes * 0.75) {
+      alignment.confluence = "STRONG_BULLISH";
+    } else if (alignment.bearishCount >= totalTimeframes * 0.75) {
+      alignment.confluence = "STRONG_BEARISH";
     } else if (alignment.bullishCount > alignment.bearishCount) {
-      alignment.confluence = "BULLISH_WEAK";
+      alignment.confluence = "WEAK_BULLISH";
     } else if (alignment.bearishCount > alignment.bullishCount) {
-      alignment.confluence = "BEARISH_WEAK";
-    } else {
-      alignment.confluence = "SIDEWAYS";
+      alignment.confluence = "WEAK_BEARISH";
     }
 
-    alignment.avgReversalRisk = avgReversalRisk;
+    // 3. Volume-Validated Momentum
+    const volumeThresholds = {
+      long: { spike: 1.8, ratio: 1.5 },
+      short: { spike: 2.0, ratio: 0.7 },
+    };
+
+    if (timeframeData.scalp && timeframeData.lower) {
+      const scalp = timeframeData.scalp.indicators;
+      const lower = timeframeData.lower.indicators;
+
+      // Bullish volume confirmation
+      if (
+        scalp.volumeSpike > volumeThresholds.long.spike &&
+        scalp.volumeDirection === "BULLISH" &&
+        lower.volumeSpike > volumeThresholds.long.spike &&
+        scalp.volume / lower.volume > volumeThresholds.long.ratio
+      ) {
+        alignment.volumeMomentum = "STRONG_BULLISH";
+      }
+      // Bearish volume confirmation
+      else if (
+        scalp.volumeSpike > volumeThresholds.short.spike &&
+        scalp.volumeDirection === "BEARISH" &&
+        lower.volumeSpike > volumeThresholds.short.spike &&
+        scalp.volume / lower.volume > volumeThresholds.short.ratio
+      ) {
+        alignment.volumeMomentum = "STRONG_BEARISH";
+      }
+    }
+
+    // 4. Institutional Order Flow Detection
+    if (timeframeData.scalp) {
+      alignment.orderFlow = this.detectOrderFlow(
+        timeframeData.scalp.data,
+        timeframeData.scalp.indicators
+      );
+
+      // Add order flow impact to weighted score
+      const flowImpact = alignment.orderFlow.absorption * 5;
+      alignment.weightedScore += flowImpact;
+    }
+
+    // 5. Divergence Detection
+    if (timeframeData.lower && timeframeData.lower.indicators) {
+      const divergence = this.detectDivergence(
+        timeframeData.lower.data,
+        timeframeData.lower.indicators.macd
+      );
+      alignment.divergence = divergence;
+
+      if (divergence === "BULLISH_DIVERGENCE") {
+        alignment.weightedScore += 15;
+      } else if (divergence === "BEARISH_DIVERGENCE") {
+        alignment.weightedScore -= 15;
+      }
+    }
+
+    // 6. Currency-specific reversal threshold
+    alignment.reversalRisk =
+      alignment.weightedScore > currencySettings.reversalThreshold
+        ? "LOW"
+        : "HIGH";
+
     return alignment;
   }
 
-  // UPDATED: Find Best Entry with SR awareness
+  // New helper method for institutional order flow detection
+  static detectOrderFlow(data, indicators) {
+    const orderFlow = { largeBlocks: 0, absorption: 0 };
+    if (!data || data.length < 20) return orderFlow;
+
+    // Calculate 10-period volume average
+    const volumes = indicators.volume.slice(-20);
+    const volumeAvg =
+      volumes.reduce((sum, vol) => sum + vol, 0) / volumes.length;
+
+    // Detect large block trades and absorption patterns
+    for (let i = 1; i < data.length; i++) {
+      const candle = data[i];
+
+      // Large block detection (3x average volume)
+      if (candle.v > volumeAvg * 3) {
+        orderFlow.largeBlocks++;
+      }
+
+      // Absorption pattern detection
+      const bodySize = Math.abs(candle.c - candle.o);
+      const range = candle.h - candle.l;
+      const isAbsorption = candle.v > volumeAvg * 1.7 && bodySize < range * 0.3;
+
+      if (isAbsorption) {
+        if (candle.c > candle.o) {
+          // Bullish absorption (price rejected lower levels)
+          orderFlow.absorption++;
+        } else {
+          // Bearish absorption (price rejected higher levels)
+          orderFlow.absorption--;
+        }
+      }
+    }
+
+    return orderFlow;
+  }
+
   static findBestEntryTimeframe(timeframeData, mainDirection) {
     let bestTimeframe = "SCALP";
     let bestScore = 0;
-    let lowestReversalRisk = 1;
 
     Object.keys(timeframeData).forEach((tf) => {
       const data = timeframeData[tf];
       if (data.analysis && data.technicalScore !== undefined) {
         let score = Math.abs(data.technicalScore);
-        const reversalRisk = data.analysis.reversalRisk || 0;
 
-        // Penalize timeframes with high reversal risk
-        score *= (1 - reversalRisk);
-
-        // Favor alignment with main direction
+        // Direction alignment bonus
         if (
           (mainDirection === "LONG" && data.technicalScore > 0) ||
           (mainDirection === "SHORT" && data.technicalScore < 0)
         ) {
-          score += 25;
+          score += 30;
         }
 
-        // Add bonus for strong patterns
-        if (
-          data.candlestickAnalysis &&
-          data.candlestickAnalysis.strength > 0.5
-        ) {
+        // Volume spike bonus
+        if (data.indicators.volumeSpike) {
           score += 20;
         }
 
-        // Prefer timeframes with lower reversal risk
-        if (reversalRisk < lowestReversalRisk) {
-          lowestReversalRisk = reversalRisk;
-          bestScore = score;
-          bestTimeframe = tf;
-        } else if (reversalRisk === lowestReversalRisk && score > bestScore) {
+        // Pattern confirmation bonus
+        if (data.candlestickAnalysis.patterns.length > 0) {
+          score += 15;
+        }
+
+        if (score > bestScore) {
           bestScore = score;
           bestTimeframe = tf;
         }
       }
     });
 
-    return { timeframe: bestTimeframe, score: bestScore, reversalRisk: lowestReversalRisk };
+    return { timeframe: bestTimeframe, score: bestScore };
+  }
+
+  // Enhanced Divergence Detection with Confirmation
+  // Enhanced Divergence Detection
+  static detectDivergence(priceData, macdData) {
+    if (!priceData || !macdData || priceData.length < 8 || macdData.length < 8)
+      return "NO_DATA";
+
+    const lookback = CONFIG.DIVERGENCE_LOOKBACK;
+    const priceSlice = priceData.slice(-lookback);
+    const macdSlice = macdData.slice(-lookback);
+
+    let bullishDivergence = 0;
+    let bearishDivergence = 0;
+
+    // Check for consecutive divergences
+    for (let i = 3; i < lookback; i++) {
+      // Bullish divergence: Lower lows in price + higher lows in MACD
+      if (
+        priceSlice[i].l < priceSlice[i - 1].l &&
+        macdSlice[i].MACD > macdSlice[i - 1].MACD &&
+        priceSlice[i - 1].l < priceSlice[i - 2].l
+      ) {
+        bullishDivergence++;
+      }
+
+      // Bearish divergence: Higher highs in price + lower highs in MACD
+      if (
+        priceSlice[i].h > priceSlice[i - 1].h &&
+        macdSlice[i].MACD < macdSlice[i - 1].MACD &&
+        priceSlice[i - 1].h > priceSlice[i - 2].h
+      ) {
+        bearishDivergence++;
+      }
+    }
+
+    // Confirmation requires at least 2 divergence signals
+    if (bullishDivergence >= 2 && bearishDivergence === 0) {
+      return "BULLISH_DIVERGENCE";
+    } else if (bearishDivergence >= 2 && bullishDivergence === 0) {
+      return "BEARISH_DIVERGENCE";
+    }
+
+    return "NO_DIVERGENCE";
   }
 }
 
-// Data Fetcher (keeping original implementation)
 class DataFetcher {
-  static async fetchTimeframeData(timeframe, symbol, days = 30) {
+  // Define custom date ranges based on timeframe
+  static getDateRangeForTimeframe(timeframe) {
+    const endDate = moment().add(3, "days").format("YYYY-MM-DD");
+    let startDate;
+
+    switch (timeframe.interval) {
+      case "minute":
+        if (timeframe.multiplier === 2)
+          // SCALP (2M)
+          startDate = moment().subtract(2, "days").format("YYYY-MM-DD");
+        else if (timeframe.multiplier === 5)
+          // LOWER (5M)
+          startDate = moment().subtract(3, "days").format("YYYY-MM-DD");
+        else if (timeframe.multiplier === 15)
+          // MEDIUM (15M)
+          startDate = moment().subtract(5, "days").format("YYYY-MM-DD");
+        else startDate = moment().subtract(7, "days").format("YYYY-MM-DD");
+        break;
+
+      case "hour": // HIGHER (1H)
+        startDate = moment().subtract(15, "days").format("YYYY-MM-DD");
+        break;
+
+      // Other timeframes remain unchanged
+      case "day":
+        startDate = moment().subtract(3, "months").format("YYYY-MM-DD");
+        break;
+      case "week":
+        startDate = moment().subtract(6, "months").format("YYYY-MM-DD");
+        break;
+      case "month":
+        startDate = moment().subtract(2, "years").format("YYYY-MM-DD");
+        break;
+      default:
+        startDate = moment().subtract(30, "days").format("YYYY-MM-DD");
+    }
+
+    return { startDate, endDate };
+  }
+
+  static async fetchTimeframeData(timeframe, symbol) {
     try {
-      const startDate = moment().subtract(days, "days").format("YYYY-MM-DD");
-      const endDate = moment().format("YYYY-MM-DD");
+      const { startDate, endDate } = this.getDateRangeForTimeframe(timeframe);
 
       let url;
       if (timeframe.interval === "minute") {
@@ -771,6 +743,12 @@ class DataFetcher {
       } else {
         url = `${CONFIG.BASE_URL}/agg/forex/${symbol}/${timeframe.multiplier}/${timeframe.interval}/${startDate}/${endDate}`;
       }
+
+      console.log(
+        `Fetching ${timeframe.multiplier}${timeframe.interval} data for ${symbol}`
+      );
+      console.log(`Date range: ${startDate} to ${endDate}`);
+      console.log("URL:", url);
 
       const response = await axios.get(url, {
         params: {
@@ -795,11 +773,21 @@ class DataFetcher {
     for (const [key, timeframe] of Object.entries(CONFIG.TIMEFRAMES)) {
       try {
         const data = await this.fetchTimeframeData(timeframe, symbol);
+        const { startDate, endDate } = this.getDateRangeForTimeframe(timeframe);
+
         timeframeData[key.toLowerCase()] = {
           data,
           timeframe: timeframe.name,
           priority: timeframe.priority,
+          dateRange: {
+            startDate,
+            endDate,
+          },
         };
+
+        console.log(
+          `✅ Successfully fetched ${data.length} records for ${timeframe.name} (${startDate} to ${endDate})`
+        );
       } catch (error) {
         console.error(
           `❌ Failed to fetch ${timeframe.name} data for ${symbol}:`,
@@ -813,64 +801,58 @@ class DataFetcher {
   }
 }
 
-// Session Analysis (keeping original)
-class SessionAnalysis {
-  static getCurrentSession() {
-    const now = moment.utc();
-    const hour = now.hour();
+// class DataFetcher {
+//   static async fetchTimeframeData(timeframe, symbol, days = 30) {
+//     try {
+//       const startDate = moment().subtract(days, "days").format("YYYY-MM-DD");
+//       const endDate = moment().format("YYYY-MM-DD");
 
-    if (hour >= 8 && hour < 9) {
-      return {
-        session: "LONDON_OPEN",
-        priority: "HIGH",
-        description: "London First Hour",
-        volatility: "HIGH",
-      };
-    } else if (hour >= 14 && hour < 15) {
-      return {
-        session: "NY_SECOND_HOUR",
-        priority: "HIGH",
-        description: "New York Second Hour",
-        volatility: "HIGH",
-      };
-    } else if (hour >= 13 && hour < 16) {
-      return {
-        session: "OVERLAP",
-        priority: "MEDIUM",
-        description: "London-NY Overlap",
-        volatility: "MEDIUM",
-      };
-    } else if (hour >= 8 && hour < 16) {
-      return {
-        session: "LONDON",
-        priority: "MEDIUM",
-        description: "London Session",
-        volatility: "MEDIUM",
-      };
-    } else if (hour >= 13 && hour < 21) {
-      return {
-        session: "NEW_YORK",
-        priority: "MEDIUM",
-        description: "New York Session",
-        volatility: "MEDIUM",
-      };
-    } else {
-      return {
-        session: "ASIAN",
-        priority: "LOW",
-        description: "Asian Session",
-        volatility: "LOW",
-      };
-    }
-  }
-}
+//       let url;
+//       if (timeframe.interval === "minute") {
+//         url = `${CONFIG.BASE_URL}/agg/forex/${symbol}/${timeframe.multiplier}/${timeframe.interval}/${startDate}/${endDate}`;
+//       } else {
+//         url = `${CONFIG.BASE_URL}/agg/forex/${symbol}/${timeframe.multiplier}/${timeframe.interval}/${startDate}/${endDate}`;
+//       }
 
-// Enhanced Gold Scalping System
-class EnhancedGoldScalpingSystem {
+//       const response = await axios.get(url, {
+//         params: {
+//           apikey: CONFIG.FINAGE_API_KEY,
+//           limit: 10000,
+//         },
+//       });
+
+//       return response.data.results || [];
+//     } catch (error) {
+//       console.error(`Error fetching ${timeframe.name} data for ${symbol}:`, error.message);
+//       throw error;
+//     }
+//   }
+
+//   static async fetchAllTimeframes(symbol) {
+//     const timeframeData = {};
+
+//     for (const [key, timeframe] of Object.entries(CONFIG.TIMEFRAMES)) {
+//       try {
+//         const data = await this.fetchTimeframeData(timeframe, symbol);
+//         timeframeData[key.toLowerCase()] = {
+//           data,
+//           timeframe: timeframe.name,
+//           priority: timeframe.priority,
+//         };
+//       } catch (error) {
+//         console.error(`Failed to fetch ${timeframe.name} data for ${symbol}:`, error.message);
+//       }
+//     }
+
+//     return timeframeData;
+//   }
+// }
+
+class TradingSystem {
   constructor(symbol) {
     this.symbol = symbol || CONFIG.DEFAULT_SYMBOL;
     this.timeframeData = {};
-    this.analysis = {};
+    this.currencySettings = getCurrencySettings(this.symbol);
   }
 
   async fetchAllData() {
@@ -878,49 +860,50 @@ class EnhancedGoldScalpingSystem {
     return this.timeframeData;
   }
 
-  analyzeTimeframe(timeframeKey) {
+  analyzeTimeframe(timeframeKey, mainDirection) {
     const timeframeInfo = this.timeframeData[timeframeKey];
-    if (!timeframeInfo || !timeframeInfo.data || timeframeInfo.data.length === 0) {
+    if (
+      !timeframeInfo ||
+      !timeframeInfo.data ||
+      timeframeInfo.data.length === 0
+    ) {
       return null;
     }
 
     const data = timeframeInfo.data;
 
-    // Calculate all technical indicators
-    const indicators = EnhancedTechnicalAnalysis.calculateAllIndicators(data);
+    const indicators = TechnicalAnalysis.calculateAllIndicators(data);
     if (!indicators) return null;
 
-    // Analyze candlestick patterns
-    const candlestickAnalysis =
-      EnhancedTechnicalAnalysis.analyzeCandlestickPatterns(data);
-
-    // Generate technical score
-    const technicalScore = EnhancedTechnicalAnalysis.generateTechnicalScore(
+    const patterns = TechnicalAnalysis.detectCandlestickPatterns(data);
+    const technicalScore = TechnicalAnalysis.generateTechnicalScore(
       indicators,
-      candlestickAnalysis
-    );
-
-    // Support/Resistance Analysis
-    const srAnalysis = EnhancedTechnicalAnalysis.findSupportResistance(data);
-
-    // Reversal Point Detection
-    const reversalAnalysis = EnhancedTechnicalAnalysis.detectReversalPoints(
       data,
-      indicators,
-      srAnalysis
+      mainDirection,
+      this.currencySettings
     );
+    const trendAnalysis = MultiTimeframeAnalysis.identifyTrend(indicators);
 
-    // Trend Analysis (now includes reversal risk)
-    const trendAnalysis = MultiTimeframeAnalysis.identifyTrend(
-      indicators,
-      candlestickAnalysis,
-      reversalAnalysis,
-      timeframeInfo.timeframe
-    );
-
-    // Current market data
     const currentPrice = data[data.length - 1].c;
-    indicators.currentPrice = currentPrice;
+    const currentATR = indicators.atr[indicators.atr.length - 1];
+    const currentRSI = indicators.rsi[indicators.rsi.length - 1];
+    const currentMACD = indicators.macd[indicators.macd.length - 1];
+    const currentBB =
+      indicators.bollingerBands[indicators.bollingerBands.length - 1];
+    const currentADX = indicators.adx[indicators.adx.length - 1];
+    const currentStoch = indicators.stoch[indicators.stoch.length - 1];
+
+    // Volume spike detection
+    const volumeLookback = Math.min(
+      CONFIG.VOLUME_LOOKBACK,
+      indicators.volume.length
+    );
+    const recentVolumes = indicators.volume.slice(-volumeLookback);
+    const volumeAvg =
+      recentVolumes.reduce((sum, vol) => sum + vol, 0) / recentVolumes.length;
+    const currentVolume = indicators.volume[indicators.volume.length - 1];
+    const volumeSpike =
+      currentVolume > volumeAvg * CONFIG.VOLUME_SPIKE_THRESHOLD;
 
     return {
       timeframe: timeframeInfo.timeframe,
@@ -928,12 +911,24 @@ class EnhancedGoldScalpingSystem {
       analysis: trendAnalysis,
       technicalScore,
       indicators: {
-        ...indicators,
+        rsi: currentRSI,
+        atr: currentATR,
+        macd: currentMACD,
+        bollingerBands: currentBB,
+        adx: currentADX,
+        stochastic: currentStoch,
         currentPrice,
+        ema20: indicators.ema20[indicators.ema20.length - 1],
+        ema50: indicators.ema50[indicators.ema50.length - 1],
+        ema200: indicators.ema200[indicators.ema200.length - 1],
+        volumeSpike,
+        volumeDirection: indicators.volumeDirection,
       },
-      candlestickAnalysis,
-      srAnalysis,
-      reversalAnalysis,
+      candlestickAnalysis: {
+        patterns,
+        signal: patterns.length > 0 ? "STRONG_SIGNAL" : "NEUTRAL",
+        strength: patterns.length * 10,
+      },
       timestamp: moment().toISOString(),
     };
   }
@@ -941,19 +936,19 @@ class EnhancedGoldScalpingSystem {
   performMultiTimeframeAnalysis() {
     const mtfAnalysis = {};
 
-    // Analyze each timeframe
+    // First pass to get main direction
     Object.keys(this.timeframeData).forEach((tf) => {
-      const analysis = this.analyzeTimeframe(tf);
+      const analysis = this.analyzeTimeframe(tf, "NO_DIRECTION");
       if (analysis) {
         mtfAnalysis[tf] = analysis;
       }
     });
 
-    // Calculate timeframe alignment
-    const alignment =
-      MultiTimeframeAnalysis.analyzeTimeframeAlignment(mtfAnalysis);
+    const alignment = MultiTimeframeAnalysis.analyzeTimeframeAlignment(
+      mtfAnalysis,
+      this.symbol
+    );
 
-    // Determine main direction from higher timeframes
     let mainDirection = "NO_TRADE";
     if (mtfAnalysis.higher && mtfAnalysis.medium) {
       const higherScore = mtfAnalysis.higher.technicalScore || 0;
@@ -966,11 +961,58 @@ class EnhancedGoldScalpingSystem {
       }
     }
 
-    // Find best entry timeframe
+    // Second pass with main direction for more accurate scoring
+    Object.keys(this.timeframeData).forEach((tf) => {
+      mtfAnalysis[tf] = this.analyzeTimeframe(tf, mainDirection);
+    });
+
     const bestEntry = MultiTimeframeAnalysis.findBestEntryTimeframe(
       mtfAnalysis,
       mainDirection
     );
+
+    // Execution Signal Filter with strict confluence
+    let executionSignal = "NO_SIGNAL";
+    const scalp = mtfAnalysis.scalp;
+    const lower = mtfAnalysis.lower;
+
+    // Require at least 3 timeframes aligned
+    if (mainDirection === "LONG" && alignment.bullishCount >= 3) {
+      if (scalp && lower) {
+        if (
+          scalp.indicators.rsi < this.currencySettings.rsiThreshold &&
+          scalp.indicators.stochastic.k < 70 &&
+          scalp.indicators.ema20 > scalp.indicators.ema50 &&
+          scalp.technicalScore > 25
+        ) {
+          executionSignal = "CONFIRMED_LONG";
+        }
+      }
+    } else if (mainDirection === "SHORT" && alignment.bearishCount >= 3) {
+      if (scalp && lower) {
+        if (
+          scalp.indicators.rsi > 100 - this.currencySettings.rsiThreshold &&
+          scalp.indicators.stochastic.k > 30 &&
+          scalp.indicators.ema20 < scalp.indicators.ema50 &&
+          scalp.technicalScore < -25
+        ) {
+          executionSignal = "CONFIRMED_SHORT";
+        }
+      }
+    }
+
+    // Add divergence to execution signal
+    if (
+      alignment.divergence === "BULLISH_DIVERGENCE" &&
+      executionSignal === "CONFIRMED_LONG"
+    ) {
+      executionSignal = "STRONG_LONG_DIVERGENCE";
+    } else if (
+      alignment.divergence === "BEARISH_DIVERGENCE" &&
+      executionSignal === "CONFIRMED_SHORT"
+    ) {
+      executionSignal = "STRONG_SHORT_DIVERGENCE";
+    }
 
     return {
       individual: mtfAnalysis,
@@ -978,292 +1020,92 @@ class EnhancedGoldScalpingSystem {
       mainDirection,
       bestEntry,
       confluence: alignment.confluence,
+      momentum: alignment.momentum,
+      executionSignal,
+      divergence: alignment.divergence,
+      reversalRisk: alignment.reversalRisk,
     };
-  }
-
-  // UPDATED: Generate Enhanced Signal with SR awareness
-  generateEnhancedSignal() {
-    const mtfAnalysis = this.performMultiTimeframeAnalysis();
-    const sessionInfo = SessionAnalysis.getCurrentSession();
-
-    // Get primary timeframe data
-    const primaryData =
-      this.timeframeData.lower?.data || this.timeframeData.scalp?.data;
-    if (!primaryData || primaryData.length === 0) {
-      throw new Error("No primary timeframe data available");
-    }
-
-    const currentPrice = primaryData[primaryData.length - 1].c;
-    const atr =
-      mtfAnalysis.individual.lower?.indicators.atr ||
-      mtfAnalysis.individual.scalp?.indicators.atr ||
-      20;
-
-    // Calculate composite technical score
-    let compositeScore = 0;
-    let totalWeight = 0;
-
-    Object.keys(mtfAnalysis.individual).forEach((tf) => {
-      const weight = CONFIG.TIMEFRAME_WEIGHTS[tf.toUpperCase()] || 0.1;
-      const score = mtfAnalysis.individual[tf].technicalScore || 0;
-      const reversalRisk = mtfAnalysis.individual[tf].analysis?.reversalRisk || 0;
-
-      compositeScore += score * weight * (1 - reversalRisk);
-      totalWeight += weight;
-    });
-
-    compositeScore = totalWeight > 0 ? compositeScore / totalWeight : 0;
-
-    // NEW: Adjust based on SR proximity
-    const srAdjustment = this.calculateSRAdjustment(
-      mtfAnalysis.individual.lower?.srAnalysis,
-      mtfAnalysis.individual.medium?.srAnalysis,
-      currentPrice
-    );
-    compositeScore += srAdjustment;
-
-    // Determine final direction and confidence
-    let finalDirection = "NO_TRADE";
-    let confidence = "LOW";
-
-    // UPDATED: Main Direction Logic
-    if (mtfAnalysis.alignment.confluence.includes("BULLISH")) {
-      finalDirection = "LONG";
-      confidence = mtfAnalysis.alignment.confluence.includes("STRONG")
-        ? "HIGH"
-        : "MEDIUM";
-    } else if (mtfAnalysis.alignment.confluence.includes("BEARISH")) {
-      finalDirection = "SHORT";
-      confidence = mtfAnalysis.alignment.confluence.includes("STRONG")
-        ? "HIGH"
-        : "MEDIUM";
-    }
-
-    // Reversal risk adjustment
-    if (mtfAnalysis.alignment.avgReversalRisk > 0.4) {
-      confidence = confidence === "HIGH" ? "MEDIUM" : "LOW";
-    }
-
-    // Session filter
-    if (sessionInfo.priority === "LOW") {
-      confidence = confidence === "HIGH" ? "MEDIUM" : "LOW";
-    }
-
-    // Risk management with SR awareness
-    const riskParams = this.calculateRiskParameters(
-      finalDirection,
-      currentPrice,
-      atr,
-      mtfAnalysis.individual.lower?.srAnalysis,
-      sessionInfo.volatility
-    );
-
-    // Entry refinement
-    const entryTimeframe = mtfAnalysis.bestEntry.timeframe;
-    const entryAnalysis = mtfAnalysis.individual[entryTimeframe.toLowerCase()];
-
-    return {
-      finalDirection,
-      confidence,
-      compositeScore: Math.round(compositeScore),
-      currentPrice,
-      ...riskParams,
-
-      // Enhanced analysis data
-      multiTimeframeAnalysis: mtfAnalysis,
-      entryTimeframe,
-      entryAnalysis,
-      sessionInfo,
-
-      // Enhanced summary
-      summary: {
-        trend: mtfAnalysis.mainDirection,
-        confluence: mtfAnalysis.confluence,
-        session: sessionInfo.session,
-        volatility: sessionInfo.volatility,
-        bestEntryTF: entryTimeframe,
-        compositeScore: Math.round(compositeScore),
-        reversalRisk: mtfAnalysis.alignment.avgReversalRisk,
-        keyIndicators: this.getKeyIndicatorSummary(mtfAnalysis.individual),
-        keySRLevels: this.getKeySRLevels(
-          mtfAnalysis.individual.lower?.srAnalysis,
-          mtfAnalysis.individual.medium?.srAnalysis
-        ),
-      },
-
-      timestamp: moment().toISOString(),
-    };
-  }
-
-  // NEW: Calculate Support/Resistance Adjustment
-  calculateSRAdjustment(lowerSR, mediumSR, currentPrice) {
-    if (!lowerSR || !mediumSR) return 0;
-
-    let adjustment = 0;
-    const relevantSR = [...lowerSR.support, ...lowerSR.resistance, ...mediumSR.support, ...mediumSR.resistance];
-
-    // Find closest SR level
-    let closestSR = null;
-    let minDistance = Infinity;
-
-    for (const level of relevantSR) {
-      const distance = Math.abs(level.price - currentPrice);
-      if (distance < minDistance) {
-        minDistance = distance;
-        closestSR = level;
-      }
-    }
-
-    if (!closestSR) return 0;
-
-    // Calculate distance factor
-    const distanceFactor = minDistance / currentPrice;
-
-    // Apply adjustment based on SR type and distance
-    if (distanceFactor < 0.001) { // Very close to SR
-      if (closestSR.type === "support") {
-        adjustment = 15; // Favor bullish near support
-      } else {
-        adjustment = -15; // Favor bearish near resistance
-      }
-    } else if (distanceFactor < 0.003) { // Moderately close
-      if (closestSR.type === "support") {
-        adjustment = 8;
-      } else {
-        adjustment = -8;
-      }
-    }
-
-    return adjustment;
-  }
-
-  // NEW: Calculate Risk Parameters with SR awareness
-  calculateRiskParameters(direction, currentPrice, atr, srAnalysis, volatility) {
-    const volatilityMultiplier = volatility === "HIGH" ? 1.5 : volatility === "MEDIUM" ? 1.2 : 1.0;
-    let stopLoss, takeProfit;
-
-    // Use SR levels if available
-    if (srAnalysis) {
-      const nearestSupport = srAnalysis.support[0]?.price;
-      const nearestResistance = srAnalysis.resistance[0]?.price;
-
-      if (direction === "LONG" && nearestSupport) {
-        stopLoss = nearestSupport - (currentPrice * 0.0005); // Just below support
-        takeProfit = currentPrice + (2 * (currentPrice - stopLoss));
-      } else if (direction === "SHORT" && nearestResistance) {
-        stopLoss = nearestResistance + (currentPrice * 0.0005); // Just above resistance
-        takeProfit = currentPrice - (2 * (stopLoss - currentPrice));
-      }
-    }
-
-    // Fallback to ATR-based if no SR levels
-    if (!stopLoss || !takeProfit) {
-      stopLoss = atr * 1.5 * volatilityMultiplier;
-      takeProfit = atr * 3.0 * volatilityMultiplier;
-
-      if (direction === "LONG") {
-        stopLoss = currentPrice - stopLoss;
-        takeProfit = currentPrice + takeProfit;
-      } else {
-        stopLoss = currentPrice + stopLoss;
-        takeProfit = currentPrice - takeProfit;
-      }
-    }
-
-    const riskRewardRatio = Math.abs(takeProfit - currentPrice) / Math.abs(stopLoss - currentPrice);
-
-    return {
-      stopLoss: Math.round(stopLoss * 100) / 100,
-      takeProfit: Math.round(takeProfit * 100) / 100,
-      riskRewardRatio: Math.round(riskRewardRatio * 100) / 100,
-    };
-  }
-
-  // NEW: Get Key SR Levels
-  getKeySRLevels(lowerSR, mediumSR) {
-    const keyLevels = [];
-
-    if (lowerSR) {
-      keyLevels.push(
-        ...lowerSR.support.slice(0, 2).map(s => ({ ...s, timeframe: "LOWER" })),
-        ...lowerSR.resistance.slice(0, 2).map(r => ({ ...r, timeframe: "LOWER" }))
-      );
-    }
-
-    if (mediumSR) {
-      keyLevels.push(
-        ...mediumSR.support.slice(0, 2).map(s => ({ ...s, timeframe: "MEDIUM" })),
-        ...mediumSR.resistance.slice(0, 2).map(r => ({ ...r, timeframe: "MEDIUM" }))
-      );
-    }
-
-    // Sort by price
-    return keyLevels.sort((a, b) => a.price - b.price);
-  }
-
-  // UPDATED: Get Key Indicator Summary
-  getKeyIndicatorSummary(individualAnalysis) {
-    const summary = {};
-
-    ["higher", "medium", "lower"].forEach((tf) => {
-      if (individualAnalysis[tf] && individualAnalysis[tf].indicators) {
-        const ind = individualAnalysis[tf].indicators;
-        summary[tf] = {
-          rsi: Math.round(ind.rsi),
-          macdSignal: ind.macd
-            ? ind.macd.MACD > ind.macd.signal
-              ? "BULL"
-              : "BEAR"
-            : "N/A",
-          adxStrength: ind.adx ? Math.round(ind.adx.adx) : "N/A",
-          bbPosition: this.getBBPosition(ind.currentPrice, ind.bollingerBands),
-          reversalRisk: individualAnalysis[tf].analysis?.reversalRisk || 0,
-        };
-      }
-    });
-
-    return summary;
-  }
-
-  getKeyIndicatorSummary(individualAnalysis) {
-    const summary = {};
-
-    // Get key indicators from primary timeframes
-    ["medium", "lower"].forEach((tf) => {
-      if (individualAnalysis[tf] && individualAnalysis[tf].indicators) {
-        const ind = individualAnalysis[tf].indicators;
-        summary[tf] = {
-          rsi: Math.round(ind.rsi),
-          macdSignal: ind.macd
-            ? ind.macd.MACD > ind.macd.signal
-              ? "BULL"
-              : "BEAR"
-            : "N/A",
-          adxStrength: ind.adx ? Math.round(ind.adx.adx) : "N/A",
-          bbPosition: this.getBBPosition(ind.currentPrice, ind.bollingerBands),
-        };
-      }
-    });
-
-    return summary;
-  }
-
-  getBBPosition(price, bb) {
-    if (!bb) return "N/A";
-
-    if (price > bb.upper) return "ABOVE_UPPER";
-    if (price < bb.lower) return "BELOW_LOWER";
-    if (price > bb.middle) return "ABOVE_MIDDLE";
-    return "BELOW_MIDDLE";
   }
 
   async analyze() {
     try {
       await this.fetchAllData();
-      const signal = this.generateEnhancedSignal();
-      return signal;
+      const mtfAnalysis = this.performMultiTimeframeAnalysis();
+
+      // Enhanced Dynamic Risk Management with currency adjustments
+      const currentPrice =
+        mtfAnalysis.individual.scalp?.indicators.currentPrice ||
+        mtfAnalysis.individual.lower?.indicators.currentPrice ||
+        1.0;
+      const atr =
+        mtfAnalysis.individual.scalp?.indicators.atr ||
+        mtfAnalysis.individual.lower?.indicators.atr ||
+        0.0002;
+
+      const volatilityFactor = (atr / currentPrice) * 10000; // In pips percentage
+
+      // Apply currency-specific volatility multiplier
+      const adjustedVolatility =
+        volatilityFactor * this.currencySettings.volatilityMultiplier;
+
+      let stopLoss, takeProfit;
+      if (adjustedVolatility > 8) {
+        // High volatility
+        stopLoss = atr * 1.2;
+        takeProfit = atr * 2.0;
+      } else if (adjustedVolatility < 3) {
+        // Low volatility
+        stopLoss = atr * 0.8;
+        takeProfit = atr * 3.5;
+      } else {
+        // Moderate volatility
+        stopLoss = atr * 1.0;
+        takeProfit = atr * 3.0;
+      }
+
+      const riskRewardRatio = takeProfit / stopLoss;
+
+      // Strict 4-minute trade duration
+      const entryTime = moment();
+      const expiryTime = entryTime
+        .clone()
+        .add(CONFIG.MAX_TRADE_DURATION, "minutes")
+        .toISOString();
+
+      // Confidence Score Calculation
+      const confidenceScore = Math.min(
+        100,
+        Math.max(
+          0,
+          mtfAnalysis.alignment.weightedScore * 0.6 +
+            mtfAnalysis.bestEntry.score * 0.4
+        )
+      );
+
+      // Market Condition Classification
+      const marketCondition =
+        adjustedVolatility > 10
+          ? "HIGH_VOLATILITY"
+          : adjustedVolatility < 2
+          ? "LOW_VOLATILITY"
+          : "MODERATE_VOLATILITY";
+
+      return {
+        success: true,
+        symbol: this.symbol.toUpperCase(),
+        analysis: {
+          multiTimeframe: mtfAnalysis,
+          confidenceScore: Math.round(confidenceScore),
+          marketCondition,
+          tradeRecommended:
+            confidenceScore > CONFIG.MIN_CONFIDENCE &&
+            mtfAnalysis.executionSignal !== "NO_SIGNAL" &&
+            mtfAnalysis.reversalRisk === "LOW",
+        },
+        message: "Enhanced multi-timeframe scalping analysis completed",
+      };
     } catch (error) {
-      console.error("❌ Analysis error:", error.message);
+      console.error("Analysis error:", error.message);
       throw error;
     }
   }
@@ -1271,13 +1113,12 @@ class EnhancedGoldScalpingSystem {
 
 // Express Routes
 app.use(express.json());
+app.use(cors());
 
 app.get("/api/mtf-scalping-signal", async (req, res) => {
   try {
-    // Get symbol from query parameters, default to EURUSD if not provided
     const symbol = req.query.symbol || CONFIG.DEFAULT_SYMBOL;
 
-    // Validate symbol format (basic validation)
     if (!symbol || typeof symbol !== "string" || symbol.length < 3) {
       return res.status(400).json({
         success: false,
@@ -1287,42 +1128,12 @@ app.get("/api/mtf-scalping-signal", async (req, res) => {
       });
     }
 
-    const tradingSystem = new EnhancedGoldScalpingSystem(symbol.toUpperCase());
-    const signal = await tradingSystem.analyze();
+    const tradingSystem = new TradingSystem(symbol.toUpperCase());
+    const result = await tradingSystem.analyze();
 
-    res.json({
-      success: true,
-      symbol: symbol.toUpperCase(),
-      // signal,
-      analysis: {
-        direction: signal.finalDirection,
-        confidence: signal.confidence,
-        score: signal.compositeScore,
-        currentPrice: signal.currentPrice,
-        session: signal.sessionInfo,
-        multiTimeframe: signal.multiTimeframeAnalysis,
-        riskManagement: {
-          stopLoss: signal.stopLoss,
-          takeProfit: signal.takeProfit,
-          riskRewardRatio: signal.riskRewardRatio,
-        },
-        recommendation: {
-          action: signal.finalDirection,
-          entry: signal.currentPrice,
-          stop:
-            signal.finalDirection === "LONG"
-              ? signal.currentPrice - signal.stopLoss
-              : signal.currentPrice + signal.stopLoss,
-          target:
-            signal.finalDirection === "LONG"
-              ? signal.currentPrice + signal.takeProfit
-              : signal.currentPrice - signal.takeProfit,
-        },
-      },
-      message: "Multi-timeframe scalping analysis completed successfully",
-    });
+    res.json(result);
   } catch (error) {
-    console.error("❌ Error:", error.message);
+    console.error("Error:", error.message);
     res.status(500).json({
       success: false,
       error: error.message,
@@ -1331,8 +1142,275 @@ app.get("/api/mtf-scalping-signal", async (req, res) => {
   }
 });
 
+// Enhanced Forex History API Endpoint
+app.get("/api/forex/history/:symbol", async (req, res) => {
+  try {
+    const { symbol } = req.params;
+    const { timeframe = 15, days = 3, format = "json" } = req.query;
+
+    // Validate symbol
+    if (!symbol || typeof symbol !== "string" || symbol.length < 3) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid symbol parameter",
+        message:
+          "Please provide a valid trading symbol (e.g., EURUSD, GBPUSD, XAUUSD)",
+      });
+    }
+
+    // Validate timeframe
+    const validTimeframes = [1, 2, 5, 15, 30, 60, 240, 1440]; // minutes
+    const timeframeNum = parseInt(timeframe);
+
+    if (!validTimeframes.includes(timeframeNum)) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid timeframe",
+        message: `Valid timeframes: ${validTimeframes.join(", ")} (in minutes)`,
+        examples: {
+          1: "1 minute",
+          5: "5 minutes",
+          15: "15 minutes",
+          60: "1 hour",
+          240: "4 hours",
+          1440: "1 day",
+        },
+      });
+    }
+
+    // Validate days
+    const daysNum = parseInt(days);
+    if (isNaN(daysNum) || daysNum < 1 || daysNum > 365) {
+      return res.status(400).json({
+        success: false,
+        error: "Invalid days parameter",
+        message: "Days must be between 1 and 365",
+      });
+    }
+
+    // Map timeframe to interval and multiplier
+    let interval, multiplier;
+    if (timeframeNum < 60) {
+      interval = "minute";
+      multiplier = timeframeNum;
+    } else if (timeframeNum < 1440) {
+      interval = "hour";
+      multiplier = timeframeNum / 60;
+    } else {
+      interval = "day";
+      multiplier = timeframeNum / 1440;
+    }
+
+    // Create timeframe object
+    const timeframeConfig = {
+      interval,
+      multiplier,
+      name: `${multiplier}${interval.charAt(0).toUpperCase()}`,
+      minutes: timeframeNum,
+    };
+
+    console.log(
+      `📊 Fetching ${symbol} history - ${timeframeConfig.name} for ${daysNum} days`
+    );
+
+    // Fetch historical data using existing DataFetcher
+    const historicalData = await DataFetcher.fetchTimeframeData(
+      timeframeConfig,
+      symbol.toUpperCase(),
+      daysNum
+    );
+
+    if (!historicalData || historicalData.length === 0) {
+      return res.status(404).json({
+        success: false,
+        error: "No data found",
+        message: `No historical data available for ${symbol.toUpperCase()} with ${
+          timeframeConfig.name
+        } timeframe`,
+      });
+    }
+
+    // Calculate basic statistics
+    const prices = historicalData.map((d) => d.c);
+    const volumes = historicalData.map((d) => d.v || 0);
+
+    const stats = {
+      totalCandles: historicalData.length,
+      dateRange: {
+        from: moment.unix(historicalData[0].t).format("YYYY-MM-DD HH:mm:ss"),
+        to: moment
+          .unix(historicalData[historicalData.length - 1].t)
+          .format("YYYY-MM-DD HH:mm:ss"),
+      },
+      priceStats: {
+        highest: Math.max(...prices),
+        lowest: Math.min(...prices),
+        firstPrice: prices[0],
+        lastPrice: prices[prices.length - 1],
+        change: prices[prices.length - 1] - prices[0],
+        changePercent: (
+          ((prices[prices.length - 1] - prices[0]) / prices[0]) *
+          100
+        ).toFixed(4),
+      },
+      volumeStats: {
+        totalVolume: volumes.reduce((sum, vol) => sum + vol, 0),
+        averageVolume:
+          volumes.length > 0
+            ? volumes.reduce((sum, vol) => sum + vol, 0) / volumes.length
+            : 0,
+        maxVolume: Math.max(...volumes),
+      },
+    };
+
+    // Format response based on requested format
+    let formattedData;
+
+    if (format === "ohlcv") {
+      // OHLCV format for trading platforms
+      formattedData = historicalData.map((candle) => [
+        candle.t * 1000, // timestamp in milliseconds
+        candle.o, // open
+        candle.h, // high
+        candle.l, // low
+        candle.c, // close
+        candle.v || 0, // volume
+      ]);
+    } else if (format === "tradingview") {
+      // TradingView format
+      formattedData = {
+        t: historicalData.map((d) => d.t),
+        o: historicalData.map((d) => d.o),
+        h: historicalData.map((d) => d.h),
+        l: historicalData.map((d) => d.l),
+        c: historicalData.map((d) => d.c),
+        v: historicalData.map((d) => d.v || 0),
+      };
+    } else {
+      // Default detailed format
+      formattedData = historicalData.map((candle) => ({
+        timestamp: candle.t,
+        datetime: moment.unix(candle.t).format("YYYY-MM-DD HH:mm:ss"),
+        open: candle.o,
+        high: candle.h,
+        low: candle.l,
+        close: candle.c,
+        volume: candle.v || 0,
+        // Additional calculated fields
+        range: candle.h - candle.l,
+        bodySize: Math.abs(candle.c - candle.o),
+        upperShadow: candle.h - Math.max(candle.o, candle.c),
+        lowerShadow: Math.min(candle.o, candle.c) - candle.l,
+        isBullish: candle.c > candle.o,
+      }));
+    }
+
+    const response = {
+      success: true,
+      symbol: symbol.toUpperCase(),
+      timeframe: {
+        interval: timeframeConfig.name,
+        minutes: timeframeNum,
+        description: getTimeframeDescription(timeframeNum),
+      },
+      requestParams: {
+        days: daysNum,
+        format: format,
+        requestTime: moment().toISOString(),
+      },
+      statistics: stats,
+      data: formattedData,
+      meta: {
+        dataSource: "Finage API",
+        currency: getCurrencyInfo(symbol.toUpperCase()),
+        timezone: "UTC",
+        disclaimer: "Historical data for analysis purposes only",
+      },
+    };
+
+    // Add technical indicators if requested
+    if (req.query.indicators === "true" && historicalData.length > 50) {
+      try {
+        const indicators =
+          TechnicalAnalysis.calculateAllIndicators(historicalData);
+        if (indicators) {
+          response.technicalIndicators = {
+            rsi: {
+              current: indicators.rsi[indicators.rsi.length - 1],
+              values: indicators.rsi.slice(-20), // Last 20 values
+            },
+            ema: {
+              ema20: indicators.ema20[indicators.ema20.length - 1],
+              ema50: indicators.ema50[indicators.ema50.length - 1],
+              ema200: indicators.ema200[indicators.ema200.length - 1],
+            },
+            macd: {
+              current: indicators.macd[indicators.macd.length - 1],
+              signal:
+                "Calculated with periods: Fast=" +
+                CONFIG.MACD_FAST +
+                ", Slow=" +
+                CONFIG.MACD_SLOW,
+            },
+          };
+        }
+      } catch (error) {
+        console.warn("Could not calculate indicators:", error.message);
+      }
+    }
+
+    res.json(response);
+  } catch (error) {
+    console.error("History API Error:", error.message);
+    res.status(500).json({
+      success: false,
+      error: error.message,
+      message: "Failed to fetch historical forex data",
+      timestamp: moment().toISOString(),
+    });
+  }
+});
+
+// Helper function to get timeframe description
+function getTimeframeDescription(minutes) {
+  if (minutes < 60) {
+    return `${minutes} minute${minutes > 1 ? "s" : ""}`;
+  } else if (minutes < 1440) {
+    const hours = minutes / 60;
+    return `${hours} hour${hours > 1 ? "s" : ""}`;
+  } else {
+    const days = minutes / 1440;
+    return `${days} day${days > 1 ? "s" : ""}`;
+  }
+}
+
+// Helper function to get currency information
+function getCurrencyInfo(symbol) {
+  const currencyPairs = {
+    EURUSD: { name: "Euro/US Dollar", category: "Major" },
+    GBPUSD: { name: "British Pound/US Dollar", category: "Major" },
+    USDJPY: { name: "US Dollar/Japanese Yen", category: "Major" },
+    USDCHF: { name: "US Dollar/Swiss Franc", category: "Major" },
+    AUDUSD: { name: "Australian Dollar/US Dollar", category: "Major" },
+    USDCAD: { name: "US Dollar/Canadian Dollar", category: "Major" },
+    NZDUSD: { name: "New Zealand Dollar/US Dollar", category: "Major" },
+    EURGBP: { name: "Euro/British Pound", category: "Cross" },
+    EURJPY: { name: "Euro/Japanese Yen", category: "Cross" },
+    GBPJPY: { name: "British Pound/Japanese Yen", category: "Cross" },
+    XAUUSD: { name: "Gold/US Dollar", category: "Commodity" },
+    XAGUSD: { name: "Silver/US Dollar", category: "Commodity" },
+  };
+
+  return (
+    currencyPairs[symbol] || {
+      name: symbol,
+      category: "Unknown",
+    }
+  );
+}
+
 app.listen(PORT, () => {
-  console.log(`🚀 Gold Scalping ssssTrading System running on port ${PORT}`);
+  console.log(`🚀 Enhanced Trading System running on port ${PORT}`);
 });
 
 module.exports = app;
