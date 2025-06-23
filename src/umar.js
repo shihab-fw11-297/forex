@@ -8,7 +8,7 @@ const PORT = 3000;
 
 // Configuration with Multiple Timeframes
 const CONFIG = {
-  FINAGE_API_KEY: "API_KEYabZ88C0XIQML3VEBAO5LJUYJ2VT83PRZ",
+  FINAGE_API_KEY: "API_KEY25MSCN60UREJFFDJIDQV630EGBQ8CNHA",
   BASE_URL: "https://api.finage.co.uk",
   DEFAULT_SYMBOL: "EURUSD",
 
