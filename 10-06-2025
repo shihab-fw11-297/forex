@@ -9,7 +9,7 @@ const PORT = 3100;
 
 // Enhanced Configuration with currency-specific settings
 const CONFIG = {
-  FINAGE_API_KEY: "API_KEYc3ZJL328BTEHL2RJR6HVFZHIXLCN8MPD",
+  FINAGE_API_KEY: "API_KEY8fY3MUFGNGUQ1SYANHIR3XPQJ7A4GD5L",
   BASE_URL: "https://api.finage.co.uk",
   DEFAULT_SYMBOL: "EURUSD",
 
@@ -47,10 +47,10 @@ const CONFIG = {
   VOLUME_LOOKBACK: 10,
 
   TIMEFRAME_WEIGHTS: {
-    HIGHER: 0.4,
-    MEDIUM: 0.3,
-    LOWER: 0.2,
-    SCALP: 0.1,
+    HIGHER: 0.25, // Reduced from 0.4
+    MEDIUM: 0.25, // Reduced from 0.3
+    LOWER: 0.25, // Increased from 0.2
+    SCALP: 0.25, // Increased from 0.1
   },
 
   // Pattern Recognition Thresholds
@@ -79,14 +79,6 @@ const CONFIG = {
     },
   },
 };
-
-// Helper function to get currency settings
-function getCurrencySettings(symbol) {
-  if (symbol.includes("JPY")) return CONFIG.CURRENCY_SETTINGS.JPY;
-  if (["MXN", "TRY", "ZAR", "BRL"].some((c) => symbol.includes(c)))
-    return CONFIG.CURRENCY_SETTINGS.EMERGING;
-  return CONFIG.CURRENCY_SETTINGS.DEFAULT;
-}
 
 class TechnicalAnalysis {
   static prepareCandleData(data) {
@@ -458,7 +450,6 @@ class MultiTimeframeAnalysis {
       orderFlow: { largeBlocks: 0, absorption: 0 },
     };
 
-    const currencySettings = getCurrencySettings(symbol);
     const now = moment();
 
     // 1. Dynamic Weighting System - Prioritize recent and volatile signals
@@ -563,12 +554,6 @@ class MultiTimeframeAnalysis {
       }
     }
 
-    // 6. Currency-specific reversal threshold
-    alignment.reversalRisk =
-      alignment.weightedScore > currencySettings.reversalThreshold
-        ? "LOW"
-        : "HIGH";
-
     return alignment;
   }
 
@@ -647,7 +632,6 @@ class MultiTimeframeAnalysis {
     return { timeframe: bestTimeframe, score: bestScore };
   }
 
-  // Enhanced Divergence Detection with Confirmation
   // Enhanced Divergence Detection
   static detectDivergence(priceData, macdData) {
     if (!priceData || !macdData || priceData.length < 8 || macdData.length < 8)
@@ -702,7 +686,7 @@ class DataFetcher {
       case "minute":
         if (timeframe.multiplier === 2)
           // SCALP (2M)
-          startDate = moment().subtract(2, "days").format("YYYY-MM-DD");
+          startDate = moment().subtract(1, "days").format("YYYY-MM-DD");
         else if (timeframe.multiplier === 5)
           // LOWER (5M)
           startDate = moment().subtract(3, "days").format("YYYY-MM-DD");
@@ -801,58 +785,11 @@ class DataFetcher {
   }
 }
 
-// class DataFetcher {
-//   static async fetchTimeframeData(timeframe, symbol, days = 30) {
-//     try {
-//       const startDate = moment().subtract(days, "days").format("YYYY-MM-DD");
-//       const endDate = moment().format("YYYY-MM-DD");
-
-//       let url;
-//       if (timeframe.interval === "minute") {
-//         url = `${CONFIG.BASE_URL}/agg/forex/${symbol}/${timeframe.multiplier}/${timeframe.interval}/${startDate}/${endDate}`;
-//       } else {
-//         url = `${CONFIG.BASE_URL}/agg/forex/${symbol}/${timeframe.multiplier}/${timeframe.interval}/${startDate}/${endDate}`;
-//       }
-
-//       const response = await axios.get(url, {
-//         params: {
-//           apikey: CONFIG.FINAGE_API_KEY,
-//           limit: 10000,
-//         },
-//       });
-
-//       return response.data.results || [];
-//     } catch (error) {
-//       console.error(`Error fetching ${timeframe.name} data for ${symbol}:`, error.message);
-//       throw error;
-//     }
-//   }
-
-//   static async fetchAllTimeframes(symbol) {
-//     const timeframeData = {};
-
-//     for (const [key, timeframe] of Object.entries(CONFIG.TIMEFRAMES)) {
-//       try {
-//         const data = await this.fetchTimeframeData(timeframe, symbol);
-//         timeframeData[key.toLowerCase()] = {
-//           data,
-//           timeframe: timeframe.name,
-//           priority: timeframe.priority,
-//         };
-//       } catch (error) {
-//         console.error(`Failed to fetch ${timeframe.name} data for ${symbol}:`, error.message);
-//       }
-//     }
-
-//     return timeframeData;
-//   }
-// }
-
 class TradingSystem {
   constructor(symbol) {
     this.symbol = symbol || CONFIG.DEFAULT_SYMBOL;
     this.timeframeData = {};
-    this.currencySettings = getCurrencySettings(this.symbol);
+    this.currencySettings = this.symbol;
   }
 
   async fetchAllData() {
@@ -1141,273 +1078,6 @@ app.get("/api/mtf-scalping-signal", async (req, res) => {
     });
   }
 });
-
-// Enhanced Forex History API Endpoint
-app.get("/api/forex/history/:symbol", async (req, res) => {
-  try {
-    const { symbol } = req.params;
-    const { timeframe = 15, days = 3, format = "json" } = req.query;
-
-    // Validate symbol
-    if (!symbol || typeof symbol !== "string" || symbol.length < 3) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid symbol parameter",
-        message:
-          "Please provide a valid trading symbol (e.g., EURUSD, GBPUSD, XAUUSD)",
-      });
-    }
-
-    // Validate timeframe
-    const validTimeframes = [1, 2, 5, 15, 30, 60, 240, 1440]; // minutes
-    const timeframeNum = parseInt(timeframe);
-
-    if (!validTimeframes.includes(timeframeNum)) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid timeframe",
-        message: `Valid timeframes: ${validTimeframes.join(", ")} (in minutes)`,
-        examples: {
-          1: "1 minute",
-          5: "5 minutes",
-          15: "15 minutes",
-          60: "1 hour",
-          240: "4 hours",
-          1440: "1 day",
-        },
-      });
-    }
-
-    // Validate days
-    const daysNum = parseInt(days);
-    if (isNaN(daysNum) || daysNum < 1 || daysNum > 365) {
-      return res.status(400).json({
-        success: false,
-        error: "Invalid days parameter",
-        message: "Days must be between 1 and 365",
-      });
-    }
-
-    // Map timeframe to interval and multiplier
-    let interval, multiplier;
-    if (timeframeNum < 60) {
-      interval = "minute";
-      multiplier = timeframeNum;
-    } else if (timeframeNum < 1440) {
-      interval = "hour";
-      multiplier = timeframeNum / 60;
-    } else {
-      interval = "day";
-      multiplier = timeframeNum / 1440;
-    }
-
-    // Create timeframe object
-    const timeframeConfig = {
-      interval,
-      multiplier,
-      name: `${multiplier}${interval.charAt(0).toUpperCase()}`,
-      minutes: timeframeNum,
-    };
-
-    console.log(
-      `📊 Fetching ${symbol} history - ${timeframeConfig.name} for ${daysNum} days`
-    );
-
-    // Fetch historical data using existing DataFetcher
-    const historicalData = await DataFetcher.fetchTimeframeData(
-      timeframeConfig,
-      symbol.toUpperCase(),
-      daysNum
-    );
-
-    if (!historicalData || historicalData.length === 0) {
-      return res.status(404).json({
-        success: false,
-        error: "No data found",
-        message: `No historical data available for ${symbol.toUpperCase()} with ${
-          timeframeConfig.name
-        } timeframe`,
-      });
-    }
-
-    // Calculate basic statistics
-    const prices = historicalData.map((d) => d.c);
-    const volumes = historicalData.map((d) => d.v || 0);
-
-    const stats = {
-      totalCandles: historicalData.length,
-      dateRange: {
-        from: moment.unix(historicalData[0].t).format("YYYY-MM-DD HH:mm:ss"),
-        to: moment
-          .unix(historicalData[historicalData.length - 1].t)
-          .format("YYYY-MM-DD HH:mm:ss"),
-      },
-      priceStats: {
-        highest: Math.max(...prices),
-        lowest: Math.min(...prices),
-        firstPrice: prices[0],
-        lastPrice: prices[prices.length - 1],
-        change: prices[prices.length - 1] - prices[0],
-        changePercent: (
-          ((prices[prices.length - 1] - prices[0]) / prices[0]) *
-          100
-        ).toFixed(4),
-      },
-      volumeStats: {
-        totalVolume: volumes.reduce((sum, vol) => sum + vol, 0),
-        averageVolume:
-          volumes.length > 0
-            ? volumes.reduce((sum, vol) => sum + vol, 0) / volumes.length
-            : 0,
-        maxVolume: Math.max(...volumes),
-      },
-    };
-
-    // Format response based on requested format
-    let formattedData;
-
-    if (format === "ohlcv") {
-      // OHLCV format for trading platforms
-      formattedData = historicalData.map((candle) => [
-        candle.t * 1000, // timestamp in milliseconds
-        candle.o, // open
-        candle.h, // high
-        candle.l, // low
-        candle.c, // close
-        candle.v || 0, // volume
-      ]);
-    } else if (format === "tradingview") {
-      // TradingView format
-      formattedData = {
-        t: historicalData.map((d) => d.t),
-        o: historicalData.map((d) => d.o),
-        h: historicalData.map((d) => d.h),
-        l: historicalData.map((d) => d.l),
-        c: historicalData.map((d) => d.c),
-        v: historicalData.map((d) => d.v || 0),
-      };
-    } else {
-      // Default detailed format
-      formattedData = historicalData.map((candle) => ({
-        timestamp: candle.t,
-        datetime: moment.unix(candle.t).format("YYYY-MM-DD HH:mm:ss"),
-        open: candle.o,
-        high: candle.h,
-        low: candle.l,
-        close: candle.c,
-        volume: candle.v || 0,
-        // Additional calculated fields
-        range: candle.h - candle.l,
-        bodySize: Math.abs(candle.c - candle.o),
-        upperShadow: candle.h - Math.max(candle.o, candle.c),
-        lowerShadow: Math.min(candle.o, candle.c) - candle.l,
-        isBullish: candle.c > candle.o,
-      }));
-    }
-
-    const response = {
-      success: true,
-      symbol: symbol.toUpperCase(),
-      timeframe: {
-        interval: timeframeConfig.name,
-        minutes: timeframeNum,
-        description: getTimeframeDescription(timeframeNum),
-      },
-      requestParams: {
-        days: daysNum,
-        format: format,
-        requestTime: moment().toISOString(),
-      },
-      statistics: stats,
-      data: formattedData,
-      meta: {
-        dataSource: "Finage API",
-        currency: getCurrencyInfo(symbol.toUpperCase()),
-        timezone: "UTC",
-        disclaimer: "Historical data for analysis purposes only",
-      },
-    };
-
-    // Add technical indicators if requested
-    if (req.query.indicators === "true" && historicalData.length > 50) {
-      try {
-        const indicators =
-          TechnicalAnalysis.calculateAllIndicators(historicalData);
-        if (indicators) {
-          response.technicalIndicators = {
-            rsi: {
-              current: indicators.rsi[indicators.rsi.length - 1],
-              values: indicators.rsi.slice(-20), // Last 20 values
-            },
-            ema: {
-              ema20: indicators.ema20[indicators.ema20.length - 1],
-              ema50: indicators.ema50[indicators.ema50.length - 1],
-              ema200: indicators.ema200[indicators.ema200.length - 1],
-            },
-            macd: {
-              current: indicators.macd[indicators.macd.length - 1],
-              signal:
-                "Calculated with periods: Fast=" +
-                CONFIG.MACD_FAST +
-                ", Slow=" +
-                CONFIG.MACD_SLOW,
-            },
-          };
-        }
-      } catch (error) {
-        console.warn("Could not calculate indicators:", error.message);
-      }
-    }
-
-    res.json(response);
-  } catch (error) {
-    console.error("History API Error:", error.message);
-    res.status(500).json({
-      success: false,
-      error: error.message,
-      message: "Failed to fetch historical forex data",
-      timestamp: moment().toISOString(),
-    });
-  }
-});
-
-// Helper function to get timeframe description
-function getTimeframeDescription(minutes) {
-  if (minutes < 60) {
-    return `${minutes} minute${minutes > 1 ? "s" : ""}`;
-  } else if (minutes < 1440) {
-    const hours = minutes / 60;
-    return `${hours} hour${hours > 1 ? "s" : ""}`;
-  } else {
-    const days = minutes / 1440;
-    return `${days} day${days > 1 ? "s" : ""}`;
-  }
-}
-
-// Helper function to get currency information
-function getCurrencyInfo(symbol) {
-  const currencyPairs = {
-    EURUSD: { name: "Euro/US Dollar", category: "Major" },
-    GBPUSD: { name: "British Pound/US Dollar", category: "Major" },
-    USDJPY: { name: "US Dollar/Japanese Yen", category: "Major" },
-    USDCHF: { name: "US Dollar/Swiss Franc", category: "Major" },
-    AUDUSD: { name: "Australian Dollar/US Dollar", category: "Major" },
-    USDCAD: { name: "US Dollar/Canadian Dollar", category: "Major" },
-    NZDUSD: { name: "New Zealand Dollar/US Dollar", category: "Major" },
-    EURGBP: { name: "Euro/British Pound", category: "Cross" },
-    EURJPY: { name: "Euro/Japanese Yen", category: "Cross" },
-    GBPJPY: { name: "British Pound/Japanese Yen", category: "Cross" },
-    XAUUSD: { name: "Gold/US Dollar", category: "Commodity" },
-    XAGUSD: { name: "Silver/US Dollar", category: "Commodity" },
-  };
-
-  return (
-    currencyPairs[symbol] || {
-      name: symbol,
-      category: "Unknown",
-    }
-  );
-}
 
 app.listen(PORT, () => {
   console.log(`🚀 Enhanced Trading System running on port ${PORT}`);
