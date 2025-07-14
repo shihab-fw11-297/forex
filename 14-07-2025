@@ -1,0 +1,1608 @@
+require('dotenv').config();
+const axios = require('axios');
+const express = require('express');
+const cron = require('node-cron');
+const technicalindicators = require('technicalindicators');
+const { v4: uuidv4 } = require('uuid');
+const fs = require('fs');
+const path = require('path');
+
+// ========== CONFIG ==========
+const FINAGE_API_KEY = "API_KEY2cBDE4DTOP712GDEQJA7QK0H0ZKKXTAQ";
+const SYMBOL = process.env.SYMBOL || 'XAUUSD';
+const PORT = process.env.PORT || 3000;
+const MAX_TRADES_PER_DAY = 4;
+const RISK_PER_TRADE = 0.01; // 1% of account per trade
+const TRADE_LOG_FILE = path.join(__dirname, 'trade-journal.json');
+
+// ========== DATA SERVICE ==========
+class DataService {
+  static async getHistorical(symbol, from, to, interval = '1min') {
+    // Convert interval to Finage API format
+    let apiInterval;
+    if (interval === '1min') {
+      apiInterval = '1/minute';
+    } else if (interval === '5min') {
+      apiInterval = '5/minute';
+    } else if (interval === '15min') {
+      apiInterval = '15/minute';
+    } else if (interval === '1hour') {
+      apiInterval = '1/hour';
+    } else if (interval === '4hour') {
+      apiInterval = '4/hour';
+    } else if (interval === '1day') {
+      apiInterval = '1/day';
+    } else {
+      apiInterval = interval; // fallback
+    }
+
+    // Format dates to YYYY-MM-DD
+    const fromDate = new Date(from).toISOString().split('T')[0];
+    const toDate = new Date(to).toISOString().split('T')[0];
+    
+    const url = `https://api.finage.co.uk/agg/forex/${symbol}/${apiInterval}/${fromDate}/${toDate}?apikey=${FINAGE_API_KEY}&limit=5000`;
+    
+    try {
+      console.log("url", url);
+      const { data } = await axios.get(url);
+      return data.results || [];
+    } catch (error) {
+      console.error('Data fetch error:', error.message);
+      return [];
+    }
+  }
+}
+
+// ========== UTILITY CLASSES ==========
+class TradeLogger {
+  static logTrade(trade) {
+    try {
+      let journal = [];
+      if (fs.existsSync(TRADE_LOG_FILE)) {
+        journal = JSON.parse(fs.readFileSync(TRADE_LOG_FILE));
+      }
+      
+      trade.id = uuidv4();
+      trade.timestamp = new Date().toISOString();
+      journal.push(trade);
+      
+      fs.writeFileSync(TRADE_LOG_FILE, JSON.stringify(journal, null, 2));
+      return trade;
+    } catch (e) {
+      console.error('Trade logging error:', e.message);
+    }
+  }
+
+  static getJournal() {
+    try {
+      if (fs.existsSync(TRADE_LOG_FILE)) {
+        return JSON.parse(fs.readFileSync(TRADE_LOG_FILE));
+      }
+      return [];
+    } catch (e) {
+      console.error('Journal read error:', e.message);
+      return [];
+    }
+  }
+}
+
+class SessionUtils {
+  static isTradingSession() {
+    const now = new Date();
+    const utcHour = now.getUTCHours();
+    // London (7am-4pm UTC) and New York (12pm-8pm UTC) overlap
+    return (utcHour >= 7 && utcHour < 20); // 7am-8pm UTC
+  }
+}
+
+// ========== MULTI-TIMEFRAME ZONE UTILS ==========
+class ZoneUtil {
+  static findZones(closes, window = 20) {
+    const slice = closes.slice(-window);
+    return {
+      support: Math.min(...slice),
+      resistance: Math.max(...slice),
+      pivot: (Math.min(...slice) + Math.max(...slice)) / 2
+    };
+  }
+
+  static multiTFZones(tfData) {
+    let zones = {};
+    for (const [tf, candles] of Object.entries(tfData)) {
+      if (candles.length > 0) {
+        const closes = candles.map(d => d.c);
+        zones[tf] = this.findZones(closes, Math.min(20, closes.length));
+      }
+    }
+    return zones;
+  }
+
+  static determineMarketStructure(closes) {
+    const lookback = Math.min(50, closes.length);
+    const prices = closes.slice(-lookback);
+    
+    // Identify swing highs and lows
+    const swingHighs = [];
+    const swingLows = [];
+    
+    for (let i = 2; i < prices.length - 2; i++) {
+      if (prices[i] > prices[i-2] && prices[i] > prices[i-1] && 
+          prices[i] > prices[i+1] && prices[i] > prices[i+2]) {
+        swingHighs.push(prices[i]);
+      }
+      
+      if (prices[i] < prices[i-2] && prices[i] < prices[i-1] && 
+          prices[i] < prices[i+1] && prices[i] < prices[i+2]) {
+        swingLows.push(prices[i]);
+      }
+    }
+    
+    // Determine market structure
+    if (swingHighs.length > 1 && swingLows.length > 1) {
+      const higherHighs = swingHighs[swingHighs.length - 1] > swingHighs[swingHighs.length - 2];
+      const higherLows = swingLows[swingLows.length - 1] > swingLows[swingLows.length - 2];
+      const lowerHighs = swingHighs[swingHighs.length - 1] < swingHighs[swingHighs.length - 2];
+      const lowerLows = swingLows[swingLows.length - 1] < swingLows[swingLows.length - 2];
+      
+      if (higherHighs && higherLows) return 'UPTREND';
+      if (lowerHighs && lowerLows) return 'DOWNTREND';
+      if (higherHighs && lowerLows) return 'BROADENING';
+      if (lowerHighs && higherLows) return 'CONSOLIDATION';
+    }
+    
+    return 'RANGE';
+  }
+}
+
+// ========== ADVANCED PATTERN UTILS ==========
+class PatternUtil {
+  static isDoubleTop(closes, window = 10) {
+    let arr = closes.slice(-window);
+    let max = Math.max(...arr);
+    let idxs = arr.map((v, i) => Math.abs(v - max) < 0.0001 ? i : -1).filter(i => i !== -1);
+    return idxs.length >= 2 && Math.abs(idxs[0] - idxs[1]) > 2;
+  }
+
+  static isDoubleBottom(closes, window = 10) {
+    let arr = closes.slice(-window);
+    let min = Math.min(...arr);
+    let idxs = arr.map((v, i) => Math.abs(v - min) < 0.0001 ? i : -1).filter(i => i !== -1);
+    return idxs.length >= 2 && Math.abs(idxs[0] - idxs[1]) > 2;
+  }
+
+  static isEngulfing(opens, closes) {
+    let len = closes.length;
+    if (len < 2) return false;
+    let prev = closes[len - 2] - opens[len - 2];
+    let curr = closes[len - 1] - opens[len - 1];
+    return (prev < 0 && curr > 0 && closes[len - 1] > opens[len - 2]) ||
+           (prev > 0 && curr < 0 && closes[len - 1] < opens[len - 2]);
+  }
+
+  static isPinBar(highs, lows, opens, closes) {
+    let len = closes.length;
+    let body = Math.abs(closes[len - 1] - opens[len - 1]);
+    let range = highs[len - 1] - lows[len - 1];
+    return range > 0 && body < 0.3 * range;
+  }
+
+  static isInsideBar(highs, lows) {
+    let len = highs.length;
+    if (len < 2) return false;
+    return highs[len - 1] < highs[len - 2] && lows[len - 1] > lows[len - 2];
+  }
+
+  static isComplexPullback(closes, window = 10) {
+    let arr = closes.slice(-window);
+    let swings = 0;
+    for (let i = 2; i < arr.length; i++) {
+      if ((arr[i] > arr[i - 1] && arr[i - 1] < arr[i - 2]) ||
+          (arr[i] < arr[i - 1] && arr[i - 1] > arr[i - 2])) {
+        swings++;
+      }
+    }
+    return swings >= 2;
+  }
+
+  static findConfluences(price, zones) {
+    const confluences = [];
+    const threshold = 0.0015; // 0.15% threshold for confluence
+    
+    // Check all timeframes for confluence
+    Object.values(zones).forEach(zone => {
+      if (Math.abs(price - zone.support) / price < threshold) {
+        confluences.push({
+          type: 'SUPPORT',
+          timeframe: 'CONFLUENCE',
+          value: zone.support
+        });
+      }
+      
+      if (Math.abs(price - zone.resistance) / price < threshold) {
+        confluences.push({
+          type: 'RESISTANCE',
+          timeframe: 'CONFLUENCE',
+          value: zone.resistance
+        });
+      }
+      
+      if (Math.abs(price - zone.pivot) / price < threshold) {
+        confluences.push({
+          type: 'PIVOT',
+          timeframe: 'CONFLUENCE',
+          value: zone.pivot
+        });
+      }
+    });
+    
+    return confluences;
+  }
+
+  static isPriceAtLevel(price, level, thresholdPercent = 0.1) {
+    const threshold = (level * thresholdPercent) / 100;
+    return Math.abs(price - level) <= threshold;
+  }
+}
+
+//
+class ProfessionalSignals {
+  constructor(data) {
+    this.data = data;
+    this.closes = data.map(d => d.c);
+    this.highs = data.map(d => d.h);
+    this.lows = data.map(d => d.l);
+    this.opens = data.map(d => d.o);
+    this.volumes = data.map(d => d.v);
+  }
+
+  // 1. Breakout Trend-Following Strategy
+  getBreakoutSignal(supportLevel, resistanceLevel) {
+    const currentPrice = this.closes[this.closes.length - 1];
+    const currentCandle = this.data[this.data.length - 1];
+    const previousCandle = this.data[this.data.length - 2];
+    
+    // Volume spike detection
+    const avgVolume = this.volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+    const volumeSpike = currentCandle.v > avgVolume * 1.5;
+    
+    // Strong bullish candle (body > wick)
+    const candleBody = Math.abs(currentCandle.c - currentCandle.o);
+    const candleRange = currentCandle.h - currentCandle.l;
+    const strongCandle = candleBody > (candleRange * 0.6);
+    
+    // Breakout above resistance
+    if (currentPrice > resistanceLevel && 
+        previousCandle.c <= resistanceLevel && 
+        currentCandle.c > currentCandle.o && 
+        strongCandle && 
+        volumeSpike) {
+      return {
+        signal: 'BUY_BREAKOUT',
+        confidence: 'HIGH',
+        reason: 'Strong bullish breakout above resistance with volume confirmation',
+        entry: currentPrice,
+        stop: resistanceLevel - (resistanceLevel * 0.001),
+        target: resistanceLevel + (resistanceLevel - supportLevel)
+      };
+    }
+    
+    // Breakdown below support
+    if (currentPrice < supportLevel && 
+        previousCandle.c >= supportLevel && 
+        currentCandle.c < currentCandle.o && 
+        strongCandle && 
+        volumeSpike) {
+      return {
+        signal: 'SELL_BREAKDOWN',
+        confidence: 'HIGH',
+        reason: 'Strong bearish breakdown below support with volume confirmation',
+        entry: currentPrice,
+        stop: supportLevel + (supportLevel * 0.001),
+        target: supportLevel - (resistanceLevel - supportLevel)
+      };
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+
+  // 2. EMA Pullback Strategy
+  getEMAPullbackSignal() {
+    const ema50 = technicalindicators.EMA.calculate({ values: this.closes, period: 50 });
+    const ema200 = technicalindicators.EMA.calculate({ values: this.closes, period: 200 });
+    
+    if (ema50.length === 0 || ema200.length === 0) return { signal: 'HOLD', confidence: 'LOW' };
+    
+    const currentPrice = this.closes[this.closes.length - 1];
+    const currentEMA50 = ema50[ema50.length - 1];
+    const currentEMA200 = ema200[ema200.length - 1];
+    const currentCandle = this.data[this.data.length - 1];
+    
+    // Check for bullish engulfing or hammer
+    const isBullishEngulfing = this.isBullishEngulfing();
+    const isHammer = this.isHammer();
+    
+    // BUY: Price above both EMAs, pullback to EMA50, bullish reversal
+    if (currentPrice > currentEMA50 && 
+        currentEMA50 > currentEMA200 && 
+        Math.abs(currentPrice - currentEMA50) / currentPrice < 0.002 && 
+        (isBullishEngulfing || isHammer)) {
+      return {
+        signal: 'BUY_EMA_PULLBACK',
+        confidence: 'HIGH',
+        reason: 'Bullish pullback to EMA50 in uptrend with reversal pattern',
+        entry: currentPrice,
+        stop: currentEMA50 - (currentEMA50 * 0.001),
+        target: currentPrice + (currentPrice - currentEMA50) * 2
+      };
+    }
+    
+    // SELL: Price below both EMAs, pullback to EMA200, bearish reversal
+    if (currentPrice < currentEMA50 && 
+        currentEMA50 < currentEMA200 && 
+        Math.abs(currentPrice - currentEMA200) / currentPrice < 0.002 && 
+        this.isShootingStar()) {
+      return {
+        signal: 'SELL_EMA_PULLBACK',
+        confidence: 'HIGH',
+        reason: 'Bearish pullback to EMA200 in downtrend with reversal pattern',
+        entry: currentPrice,
+        stop: currentEMA200 + (currentEMA200 * 0.001),
+        target: currentPrice - (currentEMA200 - currentPrice) * 2
+      };
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+
+  // 3. MACD + RSI Divergence Strategy
+  getMACDRSIDivergenceSignal() {
+    const macdData = technicalindicators.MACD.calculate({
+      values: this.closes,
+      fastPeriod: 12,
+      slowPeriod: 26,
+      signalPeriod: 9
+    });
+    
+    const rsiData = technicalindicators.RSI.calculate({
+      values: this.closes,
+      period: 14
+    });
+    
+    if (macdData.length < 10 || rsiData.length < 10) return { signal: 'HOLD', confidence: 'LOW' };
+    
+    const currentPrice = this.closes[this.closes.length - 1];
+    const previousPrice = this.closes[this.closes.length - 10];
+    const currentMACD = macdData[macdData.length - 1].MACD;
+    const previousMACD = macdData[macdData.length - 10].MACD;
+    const currentRSI = rsiData[rsiData.length - 1];
+    const previousRSI = rsiData[rsiData.length - 10];
+    
+    // Bullish divergence: Price makes lower low, MACD/RSI makes higher low
+    if (currentPrice < previousPrice && 
+        currentMACD > previousMACD && 
+        currentRSI > previousRSI &&
+        this.isBullishEngulfing()) {
+      return {
+        signal: 'BUY_DIVERGENCE',
+        confidence: 'HIGH',
+        reason: 'Bullish MACD/RSI divergence with price confirmation',
+        entry: currentPrice,
+        stop: this.findRecentLow(),
+        target: this.findRecentHigh()
+      };
+    }
+    
+    // Bearish divergence: Price makes higher high, MACD/RSI makes lower high
+    if (currentPrice > previousPrice && 
+        currentMACD < previousMACD && 
+        currentRSI < previousRSI &&
+        this.isShootingStar()) {
+      return {
+        signal: 'SELL_DIVERGENCE',
+        confidence: 'HIGH',
+        reason: 'Bearish MACD/RSI divergence with price confirmation',
+        entry: currentPrice,
+        stop: this.findRecentHigh(),
+        target: this.findRecentLow()
+      };
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+
+  // 4. Price Action Levels Strategy
+  getPriceActionLevelsSignal(demandZone, supplyZone) {
+    const currentPrice = this.closes[this.closes.length - 1];
+    const currentCandle = this.data[this.data.length - 1];
+    
+    // Volume analysis
+    const avgVolume = this.volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+    const decreasingVolume = currentCandle.v < avgVolume * 0.8;
+    
+    // BUY: Price at demand zone with hammer/engulfing
+    if (Math.abs(currentPrice - demandZone) / currentPrice < 0.001 && 
+        decreasingVolume && 
+        (this.isHammer() || this.isBullishEngulfing())) {
+      return {
+        signal: 'BUY_DEMAND_ZONE',
+        confidence: 'HIGH',
+        reason: 'Price at demand zone with bullish reversal pattern',
+        entry: currentPrice,
+        stop: demandZone - (demandZone * 0.001),
+        target: supplyZone
+      };
+    }
+    
+    // SELL: Price at supply zone with shooting star/bearish engulfing
+    if (Math.abs(currentPrice - supplyZone) / currentPrice < 0.001 && 
+        (this.isShootingStar() || this.isBearishEngulfing())) {
+      return {
+        signal: 'SELL_SUPPLY_ZONE',
+        confidence: 'HIGH',
+        reason: 'Price at supply zone with bearish reversal pattern',
+        entry: currentPrice,
+        stop: supplyZone + (supplyZone * 0.001),
+        target: demandZone
+      };
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+
+  // 5. Bollinger Band Reversal Strategy
+  getBollingerBandSignal() {
+    const bb = technicalindicators.BollingerBands.calculate({
+      values: this.closes,
+      period: 20,
+      stdDev: 2
+    });
+    
+    const rsiData = technicalindicators.RSI.calculate({
+      values: this.closes,
+      period: 14
+    });
+    
+    if (bb.length === 0 || rsiData.length === 0) return { signal: 'HOLD', confidence: 'LOW' };
+    
+    const currentPrice = this.closes[this.closes.length - 1];
+    const currentBB = bb[bb.length - 1];
+    const currentRSI = rsiData[rsiData.length - 1];
+    
+    // BUY: Price pierces lower BB + hammer/engulfing + RSI < 30
+    if (currentPrice < currentBB.lower && 
+        (this.isHammer() || this.isBullishEngulfing()) && 
+        currentRSI < 30) {
+      return {
+        signal: 'BUY_BB_REVERSAL',
+        confidence: 'HIGH',
+        reason: 'Price oversold at lower Bollinger Band with reversal pattern',
+        entry: currentPrice,
+        stop: currentBB.lower - (currentBB.lower * 0.001),
+        target: currentBB.middle
+      };
+    }
+    
+    // SELL: Price pierces upper BB + shooting star/bearish engulfing + RSI > 70
+    if (currentPrice > currentBB.upper && 
+        (this.isShootingStar() || this.isBearishEngulfing()) && 
+        currentRSI > 70) {
+      return {
+        signal: 'SELL_BB_REVERSAL',
+        confidence: 'HIGH',
+        reason: 'Price overbought at upper Bollinger Band with reversal pattern',
+        entry: currentPrice,
+        stop: currentBB.upper + (currentBB.upper * 0.001),
+        target: currentBB.middle
+      };
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+
+  // 6. Volume Breakout Confirmation Strategy
+  getVolumeBreakoutSignal() {
+    const currentPrice = this.closes[this.closes.length - 1];
+    const currentCandle = this.data[this.data.length - 1];
+    const avgVolume = this.volumes.slice(-20).reduce((a, b) => a + b, 0) / 20;
+    const volumeSpike = currentCandle.v > avgVolume * 2;
+    
+    // Check for consolidation breakout
+    const consolidationRange = this.detectConsolidation();
+    
+    if (consolidationRange && volumeSpike) {
+      // Bullish breakout
+      if (currentPrice > consolidationRange.high && 
+          currentCandle.c > currentCandle.o) {
+        return {
+          signal: 'BUY_VOLUME_BREAKOUT',
+          confidence: 'HIGH',
+          reason: 'Bullish breakout from consolidation with volume spike',
+          entry: currentPrice,
+          stop: consolidationRange.high - (consolidationRange.high * 0.001),
+          target: consolidationRange.high + (consolidationRange.high - consolidationRange.low)
+        };
+      }
+      
+      // Bearish breakdown
+      if (currentPrice < consolidationRange.low && 
+          currentCandle.c < currentCandle.o) {
+        return {
+          signal: 'SELL_VOLUME_BREAKDOWN',
+          confidence: 'HIGH',
+          reason: 'Bearish breakdown from consolidation with volume spike',
+          entry: currentPrice,
+          stop: consolidationRange.low + (consolidationRange.low * 0.001),
+          target: consolidationRange.low - (consolidationRange.high - consolidationRange.low)
+        };
+      }
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+
+  // Helper methods for pattern recognition
+  isBullishEngulfing() {
+    if (this.data.length < 2) return false;
+    const current = this.data[this.data.length - 1];
+    const previous = this.data[this.data.length - 2];
+    
+    return previous.c < previous.o && // Previous bearish
+           current.c > current.o && // Current bullish
+           current.c > previous.o && // Current close > previous open
+           current.o < previous.c; // Current open < previous close
+  }
+
+  isBearishEngulfing() {
+    if (this.data.length < 2) return false;
+    const current = this.data[this.data.length - 1];
+    const previous = this.data[this.data.length - 2];
+    
+    return previous.c > previous.o && // Previous bullish
+           current.c < current.o && // Current bearish
+           current.c < previous.o && // Current close < previous open
+           current.o > previous.c; // Current open > previous close
+  }
+
+  isHammer() {
+    if (this.data.length === 0) return false;
+    const candle = this.data[this.data.length - 1];
+    const body = Math.abs(candle.c - candle.o);
+    const lowerWick = Math.min(candle.o, candle.c) - candle.l;
+    const upperWick = candle.h - Math.max(candle.o, candle.c);
+    const range = candle.h - candle.l;
+    
+    return lowerWick > body * 2 && upperWick < body && range > 0;
+  }
+
+  isShootingStar() {
+    if (this.data.length === 0) return false;
+    const candle = this.data[this.data.length - 1];
+    const body = Math.abs(candle.c - candle.o);
+    const lowerWick = Math.min(candle.o, candle.c) - candle.l;
+    const upperWick = candle.h - Math.max(candle.o, candle.c);
+    const range = candle.h - candle.l;
+    
+    return upperWick > body * 2 && lowerWick < body && range > 0;
+  }
+
+  findRecentHigh() {
+    return Math.max(...this.closes.slice(-20));
+  }
+
+  findRecentLow() {
+    return Math.min(...this.closes.slice(-20));
+  }
+
+  detectConsolidation() {
+    const period = 20;
+    if (this.closes.length < period) return null;
+    
+    const recentPrices = this.closes.slice(-period);
+    const high = Math.max(...recentPrices);
+    const low = Math.min(...recentPrices);
+    const range = high - low;
+    const avgPrice = recentPrices.reduce((a, b) => a + b, 0) / period;
+    
+    // Check if price has been consolidating (range < 2% of average price)
+    if (range / avgPrice < 0.02) {
+      return { high, low, range };
+    }
+    
+    return null;
+  }
+}
+
+// ========== INDICATOR UTILS ==========
+class IndicatorUtil {
+  static calcRSI(closes, period = 14) {
+    if (closes.length < period) return [];
+    return technicalindicators.RSI.calculate({ values: closes, period });
+  }
+
+  static calcMACD(closes) {
+    if (closes.length < 26) return [];
+    return technicalindicators.MACD.calculate({
+      values: closes,
+      fastPeriod: 12,
+      slowPeriod: 26,
+      signalPeriod: 9,
+      SimpleMAOscillator: false,
+      SimpleMASignal: false,
+    });
+  }
+
+  static calcATR(highs, lows, closes, period = 14) {
+    if (highs.length < period || lows.length < period || closes.length < period) return [];
+    return technicalindicators.ATR.calculate({ high: highs, low: lows, close: closes, period });
+  }
+
+  static calcSupertrend(highs, lows, closes, period = 7, multiplier = 2) {
+    if (highs.length < period || lows.length < period || closes.length < period) return [];
+    const atr = IndicatorUtil.calcATR(highs, lows, closes, period);
+    let supertrend = [];
+    let direction = null;
+    
+    for (let i = period; i < closes.length; i++) {
+      let hl2 = (highs[i] + lows[i]) / 2;
+      let upperBand = hl2 + multiplier * atr[i - period];
+      let lowerBand = hl2 - multiplier * atr[i - period];
+      
+      if (i === period) {
+        direction = closes[i] > upperBand ? 'up' : 'down';
+      } else {
+        if (closes[i] > upperBand) direction = 'up';
+        else if (closes[i] < lowerBand) direction = 'down';
+      }
+      
+      supertrend.push({
+        value: direction === 'up' ? lowerBand : upperBand,
+        direction
+      });
+    }
+    return supertrend;
+  }
+
+  static calcVWMA(closes, volumes, period = 20) {
+    if (closes.length < period || volumes.length < period) return [];
+    
+    const vwma = [];
+    for (let i = period - 1; i < closes.length; i++) {
+      let sum = 0;
+      let volSum = 0;
+      
+      for (let j = 0; j < period; j++) {
+        const idx = i - j;
+        sum += closes[idx] * volumes[idx];
+        volSum += volumes[idx];
+      }
+      
+      vwma.push(sum / volSum);
+    }
+    
+    return vwma;
+  }
+
+  static calcOBV(closes, volumes) {
+    if (closes.length < 2) return [];
+    
+    const obv = [volumes[0]];
+    for (let i = 1; i < closes.length; i++) {
+      if (closes[i] > closes[i-1]) {
+        obv.push(obv[obv.length - 1] + volumes[i]);
+      } else if (closes[i] < closes[i-1]) {
+        obv.push(obv[obv.length - 1] - volumes[i]);
+      } else {
+        obv.push(obv[obv.length - 1]);
+      }
+    }
+    
+    return obv;
+  }
+}
+
+// ========== PROFESSIONAL STRATEGY ==========
+class ProMultiTFStrategy {
+  constructor(data, tfZones) {
+    this.data = data;
+    this.closes = data.map(d => d.c);
+    this.highs = data.map(d => d.h);
+    this.lows = data.map(d => d.l);
+    this.opens = data.map(d => d.o);
+    this.volumes = data.map(d => d.v);
+    this.tfZones = tfZones;
+    this.tradeCount = 0;
+    this.marketStructure = ZoneUtil.determineMarketStructure(this.closes);
+  }
+
+  analyze() {
+    // Patterns
+    const doubleTop = PatternUtil.isDoubleTop(this.closes, 12);
+    const doubleBottom = PatternUtil.isDoubleBottom(this.closes, 12);
+    const engulfing = PatternUtil.isEngulfing(this.opens, this.closes);
+    const pinbar = PatternUtil.isPinBar(this.highs, this.lows, this.opens, this.closes);
+    const insideBar = PatternUtil.isInsideBar(this.highs, this.lows);
+    const complexPullback = PatternUtil.isComplexPullback(this.closes, 10);
+
+    // Indicators
+    const rsiArr = IndicatorUtil.calcRSI(this.closes, 14);
+    const supertrendArr = IndicatorUtil.calcSupertrend(this.highs, this.lows, this.closes, 7, 2);
+    const atrArr = IndicatorUtil.calcATR(this.highs, this.lows, this.closes, 14);
+    const vwma = IndicatorUtil.calcVWMA(this.closes, this.volumes, 20);
+    const obv = IndicatorUtil.calcOBV(this.closes, this.volumes);
+
+    const rsi = rsiArr.length > 0 ? rsiArr[rsiArr.length - 1] : 50;
+    const supertrend = supertrendArr.length > 0 ? supertrendArr[supertrendArr.length - 1] : { value: 0, direction: 'neutral' };
+    const atr = atrArr.length > 0 ? atrArr[atrArr.length - 1] : 1;
+    const currentVWMA = vwma.length > 0 ? vwma[vwma.length - 1] : 0;
+    const obvSlope = obv.length > 5 ? (obv[obv.length-1] - obv[obv.length-5]) / 5 : 0;
+
+    // Get nearest significant zone
+    const nearestZone = this.findNearestZone();
+    
+    // Price confluences
+    const priceConfluences = PatternUtil.findConfluences(
+      this.closes[this.closes.length - 1], 
+      this.tfZones
+    );
+
+    return {
+      doubleTop, doubleBottom, engulfing, pinbar, insideBar, complexPullback,
+      rsi, supertrend, atr, nearestZone,
+      vwma: currentVWMA,
+      obvSlope,
+      priceConfluences,
+      marketStructure: this.marketStructure
+    };
+  }
+
+  findNearestZone() {
+    const currentPrice = this.closes[this.closes.length - 1];
+    let nearestSupport = Infinity;
+    let nearestResistance = Infinity;
+    let minSupportDist = Infinity;
+    let minResistanceDist = Infinity;
+
+    for (const [tf, zone] of Object.entries(this.tfZones)) {
+      if (!zone) continue;
+      
+      // Support zones
+      const supportDist = Math.abs(currentPrice - zone.support);
+      if (supportDist < minSupportDist) {
+        minSupportDist = supportDist;
+        nearestSupport = zone.support;
+      }
+      
+      // Resistance zones
+      const resistanceDist = Math.abs(currentPrice - zone.resistance);
+      if (resistanceDist < minResistanceDist) {
+        minResistanceDist = resistanceDist;
+        nearestResistance = zone.resistance;
+      }
+    }
+
+    return {
+      support: nearestSupport,
+      resistance: nearestResistance,
+      pivot: (nearestSupport + nearestResistance) / 2
+    };
+  }
+
+  generateSignal(analysis) {
+    // Skip if not in trading session
+    if (!SessionUtils.isTradingSession()) {
+      return { signal: 'OUT_OF_SESSION', reason: 'Outside optimal trading hours' };
+    }
+
+    // Skip if we've reached daily trade limit
+    if (this.tradeCount >= MAX_TRADES_PER_DAY) {
+      return { signal: 'MAX_TRADES_REACHED' };
+    }
+
+    const currentPrice = this.closes[this.closes.length - 1];
+    const { support, resistance, pivot } = analysis.nearestZone;
+    const atr = analysis.atr || 1;
+    const price = currentPrice;
+
+    // Add directional context to complexPullback
+    const bullishComplexPullback = analysis.complexPullback && 
+      this.closes[this.closes.length - 2] < this.closes[this.closes.length - 3] &&
+      price > this.closes[this.closes.length - 2];
+    
+    const bearishComplexPullback = analysis.complexPullback && 
+      this.closes[this.closes.length - 2] > this.closes[this.closes.length - 3] &&
+      price < this.closes[this.closes.length - 2];
+
+    // Volume spike detection
+    const volumeSpike = this.volumes.length > 10 && 
+      this.volumes[this.volumes.length - 1] > 1.8 * this.volumes.slice(-10, -1).reduce((a, b) => a + b, 0) / 9;
+
+    // OBV confirmation (bullish if rising, bearish if falling)
+    const obvBullish = analysis.obvSlope > 0;
+    const obvBearish = analysis.obvSlope < 0;
+
+    // Price position relative to VWMA
+    const aboveVWMA = price > analysis.vwma;
+    const belowVWMA = price < analysis.vwma;
+
+    // 1. TREND-FOLLOWING SIGNALS
+    if (analysis.marketStructure === 'UPTREND' && aboveVWMA) {
+      // Pullback buy in uptrend
+      if (PatternUtil.isPriceAtLevel(price, support) && 
+          analysis.rsi > 40 && 
+          obvBullish &&
+          (bullishComplexPullback || pinbar || engulfing)) {
+        this.tradeCount++;
+        return { 
+          signal: 'BUY_TREND', 
+          stop: support - 1.2 * atr, 
+          target: resistance,
+          reason: 'Trend continuation at support',
+          confidence: 'HIGH'
+        };
+      }
+    }
+    
+    if (analysis.marketStructure === 'DOWNTREND' && belowVWMA) {
+      // Rally sell in downtrend
+      if (PatternUtil.isPriceAtLevel(price, resistance) && 
+          analysis.rsi < 60 && 
+          obvBearish &&
+          (bearishComplexPullback || pinbar || engulfing)) {
+        this.tradeCount++;
+        return { 
+          signal: 'SELL_TREND', 
+          stop: resistance + 1.2 * atr, 
+          target: support,
+          reason: 'Trend continuation at resistance',
+          confidence: 'HIGH'
+        };
+      }
+    }
+
+    // 2. REVERSAL SIGNALS AT KEY LEVELS (with confluence)
+    const supportConfluence = analysis.priceConfluences.some(c => 
+      c.type === 'SUPPORT' && PatternUtil.isPriceAtLevel(price, c.value)
+    );
+    
+    const resistanceConfluence = analysis.priceConfluences.some(c => 
+      c.type === 'RESISTANCE' && PatternUtil.isPriceAtLevel(price, c.value)
+    );
+
+    if (supportConfluence) {
+      if ((analysis.doubleBottom || bullishComplexPullback) &&
+          analysis.supertrend.direction === 'up' &&
+          price > analysis.supertrend.value) {
+        this.tradeCount++;
+        return { 
+          signal: 'BUY_REVERSAL', 
+          stop: support - 1.2 * atr, 
+          target: pivot,
+          reason: 'Reversal pattern at support confluence',
+          confidence: 'MEDIUM'
+        };
+      }
+    }
+
+    if (resistanceConfluence) {
+      if ((analysis.doubleTop || bearishComplexPullback) &&
+          analysis.supertrend.direction === 'down' &&
+          price < analysis.supertrend.value) {
+        this.tradeCount++;
+        return { 
+          signal: 'SELL_REVERSAL', 
+          stop: resistance + 1.2 * atr, 
+          target: pivot,
+          reason: 'Reversal pattern at resistance confluence',
+          confidence: 'MEDIUM'
+        };
+      }
+    }
+
+    // 3. BREAKOUTS WITH VOLUME CONFIRMATION
+    const breakout = price > resistance;
+    const breakdown = price < support;
+    
+    if (breakout && volumeSpike && obvBullish && aboveVWMA) {
+      this.tradeCount++;
+      return { 
+        signal: 'BUY_BREAKOUT', 
+        stop: support - atr, 
+        target: resistance + (resistance - support),
+        reason: 'Breakout with volume confirmation',
+        confidence: 'HIGH'
+      };
+    }
+
+    if (breakdown && volumeSpike && obvBearish && belowVWMA) {
+      this.tradeCount++;
+      return { 
+        signal: 'SELL_BREAKDOWN', 
+        stop: resistance + atr, 
+        target: support - (resistance - support),
+        reason: 'Breakdown with volume confirmation',
+        confidence: 'HIGH'
+      };
+    }
+    
+    return { signal: 'HOLD', confidence: 'LOW' };
+  }
+}
+
+// ========== ENHANCED PROFESSIONAL STRATEGY CLASS ==========
+// Add this to your existing ProMultiTFStrategy class or create a new one
+class EnhancedProStrategy extends ProMultiTFStrategy {
+  constructor(data, tfZones) {
+    super(data, tfZones);
+    this.professionalSignals = new ProfessionalSignals(data);
+  }
+
+  // Override the generateSignal method to include all strategies
+  generateSignal(analysis) {
+    // Skip if not in trading session
+    if (!SessionUtils.isTradingSession()) {
+      return { signal: 'OUT_OF_SESSION', reason: 'Outside optimal trading hours' };
+    }
+
+    // Skip if we've reached daily trade limit
+    if (this.tradeCount >= MAX_TRADES_PER_DAY) {
+      return { signal: 'MAX_TRADES_REACHED' };
+    }
+
+    const currentPrice = this.closes[this.closes.length - 1];
+    const { support, resistance } = analysis.nearestZone;
+    
+    // Get all professional signals
+    const signals = {
+      breakout: this.professionalSignals.getBreakoutSignal(support, resistance),
+      emaPullback: this.professionalSignals.getEMAPullbackSignal(),
+      macdRsiDivergence: this.professionalSignals.getMACDRSIDivergenceSignal(),
+      priceActionLevels: this.professionalSignals.getPriceActionLevelsSignal(support, resistance),
+      bollingerBand: this.professionalSignals.getBollingerBandSignal(),
+      volumeBreakout: this.professionalSignals.getVolumeBreakoutSignal()
+    };
+
+    // Also get the original signal
+    const originalSignal = super.generateSignal(analysis);
+
+    // Count high-confidence signals
+    const highConfidenceSignals = Object.values(signals).filter(s => s.confidence === 'HIGH');
+    const buySignals = highConfidenceSignals.filter(s => s.signal.startsWith('BUY'));
+    const sellSignals = highConfidenceSignals.filter(s => s.signal.startsWith('SELL'));
+
+    // Multi-strategy confluence logic
+    if (buySignals.length >= 2) {
+      this.tradeCount++;
+      return {
+        signal: 'BUY_CONFLUENCE',
+        confidence: 'VERY_HIGH',
+        reason: `Multiple buy signals: ${buySignals.map(s => s.reason).join(', ')}`,
+        entry: currentPrice,
+        stop: Math.min(...buySignals.map(s => s.stop)),
+        target: Math.max(...buySignals.map(s => s.target)),
+        strategies: buySignals,
+        originalSignal
+      };
+    }
+
+    if (sellSignals.length >= 2) {
+      this.tradeCount++;
+      return {
+        signal: 'SELL_CONFLUENCE',
+        confidence: 'VERY_HIGH',
+        reason: `Multiple sell signals: ${sellSignals.map(s => s.reason).join(', ')}`,
+        entry: currentPrice,
+        stop: Math.max(...sellSignals.map(s => s.stop)),
+        target: Math.min(...sellSignals.map(s => s.target)),
+        strategies: sellSignals,
+        originalSignal
+      };
+    }
+
+    // Single high-confidence signal
+    if (highConfidenceSignals.length === 1) {
+      this.tradeCount++;
+      return {
+        ...highConfidenceSignals[0],
+        originalSignal,
+        allSignals: signals
+      };
+    }
+
+    // Return original signal if no professional signals
+    return {
+      ...originalSignal,
+      allSignals: signals,
+      professionalSignalsCount: highConfidenceSignals.length
+    };
+  }
+}
+
+
+// ========== BACKTESTER ==========
+class Backtester {
+  constructor(data, strategyClass, tfZones = null) {
+    this.data = data;
+    this.strategyClass = strategyClass;
+    this.tfZones = tfZones;
+    this.results = [];
+    this.metrics = {};
+  }
+  
+  async run() {
+    let equity = 100000;
+    let trades = [];
+    let openTrade = null;
+    let win = 0, loss = 0, total = 0, pnl = 0;
+    let maxDrawdown = 0, peak = equity;
+    let cooldown = 0;
+    let tradeCountToday = 0;
+    let currentDay = null;
+    const minATR = 0.5; // Minimum ATR for valid trade
+    let consecutiveLosses = 0;
+
+    // Advanced metrics
+    let longTrades = 0, shortTrades = 0;
+    let winLong = 0, winShort = 0;
+    let maxRunup = 0, maxDrawdownTrade = 0;
+    let profitFactor = 0, sharpeRatio = 0;
+    const returns = [];
+
+    for (let i = 60; i < this.data.length; i++) {
+      const candle = this.data[i];
+      const candleDate = new Date(candle.t);
+      const candleDay = candleDate.toISOString().split('T')[0];
+      
+      // Reset daily trade counter
+      if (currentDay !== candleDay) {
+        currentDay = candleDay;
+        tradeCountToday = 0;
+        consecutiveLosses = 0;
+      }
+      
+      // Skip if in cooldown period
+      if (cooldown > 0) {
+        cooldown--;
+        continue;
+      }
+      
+      const window = this.data.slice(Math.max(0, i - 60), i);
+      let strat, analysis, signal;
+      
+      try {
+        if (this.tfZones) {
+          strat = new this.strategyClass(window, this.tfZones);
+          analysis = strat.analyze();
+          signal = strat.generateSignal(analysis);
+        } else {
+          strat = new this.strategyClass(window);
+          analysis = strat.analyze();
+          signal = strat.generateSignal(analysis);
+        }
+      } catch (e) {
+        console.error(`Analysis error at index ${i}:`, e.message);
+        continue;
+      }
+      
+      // Skip if max trades reached for day
+      if (tradeCountToday >= MAX_TRADES_PER_DAY) continue;
+      
+      // Entry logic
+      if (!openTrade && (signal.signal.startsWith('BUY') || signal.signal.startsWith('SELL'))) {
+        // Skip low volatility trades
+        if (analysis.atr < minATR) continue;
+        
+        // Risk-based position sizing
+        const riskAmount = equity * RISK_PER_TRADE;
+        const stopDistance = Math.abs(candle.o - signal.stop);
+        const positionSize = stopDistance > 0 ? riskAmount / stopDistance : 0;
+        
+        openTrade = {
+          type: signal.signal,
+          entry: candle.o,
+          stop: signal.stop,
+          target: signal.target,
+          positionSize,
+          index: i,
+          time: candle.t,
+          reason: signal.reason || '',
+          confidence: signal.confidence || 'MEDIUM',
+          maxProfit: 0,
+          maxLoss: 0
+        };
+        tradeCountToday++;
+      }
+      
+      // Exit logic
+      if (openTrade) {
+        const price = candle.c;
+        let exitReason = '';
+        let profit = 0;
+        
+        // Calculate trade metrics
+        const tradeProfit = openTrade.type.startsWith('BUY') ? 
+          (price - openTrade.entry) * openTrade.positionSize : 
+          (openTrade.entry - price) * openTrade.positionSize;
+        
+        // Track max profit/loss
+        if (tradeProfit > openTrade.maxProfit) openTrade.maxProfit = tradeProfit;
+        if (tradeProfit < openTrade.maxLoss) openTrade.maxLoss = tradeProfit;
+        
+        // Check stop loss
+        if ((openTrade.type.startsWith('BUY') && price <= openTrade.stop) ||
+            (openTrade.type.startsWith('SELL') && price >= openTrade.stop)) {
+          exitReason = 'STOP_LOSS';
+          profit = (openTrade.stop - openTrade.entry) * openTrade.positionSize * 
+                   (openTrade.type.startsWith('BUY') ? 1 : -1);
+        }
+        // Check take profit
+        else if ((openTrade.type.startsWith('BUY') && price >= openTrade.target) ||
+                 (openTrade.type.startsWith('SELL') && price <= openTrade.target)) {
+          exitReason = 'TAKE_PROFIT';
+          profit = (openTrade.target - openTrade.entry) * openTrade.positionSize * 
+                   (openTrade.type.startsWith('BUY') ? 1 : -1);
+        }
+        
+        if (exitReason) {
+          profit = parseFloat(profit.toFixed(2));
+          pnl += profit;
+          equity += profit;
+          
+          const tradeResult = {
+            ...openTrade,
+            exit: price,
+            profit,
+            outcome: exitReason,
+            maxProfit: openTrade.maxProfit,
+            maxLoss: openTrade.maxLoss,
+            duration: i - openTrade.index
+          };
+          
+          trades.push(tradeResult);
+          TradeLogger.logTrade(tradeResult);
+          
+          total++;
+          if (profit > 0) {
+            win++;
+            consecutiveLosses = 0;
+            if (openTrade.type.startsWith('BUY')) winLong++;
+            if (openTrade.type.startsWith('SELL')) winShort++;
+          } else {
+            loss++;
+            consecutiveLosses++;
+          }
+          
+          if (openTrade.type.startsWith('BUY')) longTrades++;
+          if (openTrade.type.startsWith('SELL')) shortTrades++;
+          
+          // Calculate runup/drawdown
+          const runup = openTrade.maxProfit / (equity - profit);
+          const drawdown = openTrade.maxLoss / (equity - profit);
+          if (runup > maxRunup) maxRunup = runup;
+          if (drawdown < maxDrawdownTrade) maxDrawdownTrade = drawdown;
+          
+          // Add to returns for Sharpe ratio
+          returns.push(profit / (equity - profit));
+          
+          openTrade = null;
+          cooldown = consecutiveLosses > 2 ? 10 : 5; // Longer cooldown after consecutive losses
+        }
+      }
+      
+      // Update drawdown
+      if (equity > peak) peak = equity;
+      const drawdown = (peak - equity) / peak;
+      if (drawdown > maxDrawdown) maxDrawdown = drawdown;
+    }
+    
+    // Close any open trade at end
+    if (openTrade) {
+      const price = this.data[this.data.length - 1].c;
+      const profit = openTrade.type.startsWith('BUY') ? 
+        (price - openTrade.entry) * openTrade.positionSize : 
+        (openTrade.entry - price) * openTrade.positionSize;
+      
+      pnl += profit;
+      const tradeResult = {
+        ...openTrade,
+        exit: price,
+        profit,
+        outcome: 'FORCE_CLOSE',
+        maxProfit: openTrade.maxProfit,
+        maxLoss: openTrade.maxLoss,
+        duration: this.data.length - openTrade.index
+      };
+      
+      trades.push(tradeResult);
+      TradeLogger.logTrade(tradeResult);
+      
+      total++;
+      if (profit > 0) {
+        win++;
+        if (openTrade.type.startsWith('BUY')) winLong++;
+        if (openTrade.type.startsWith('SELL')) winShort++;
+      } else {
+        loss++;
+      }
+      
+      if (openTrade.type.startsWith('BUY')) longTrades++;
+      if (openTrade.type.startsWith('SELL')) shortTrades++;
+    }
+    
+    // Calculate advanced metrics
+    const winRate = total ? (win / total) * 100 : 0;
+    const avgPnL = total ? pnl / total : 0;
+    
+    // Profit factor
+    const grossProfit = trades.filter(t => t.profit > 0).reduce((sum, t) => sum + t.profit, 0);
+    const grossLoss = Math.abs(trades.filter(t => t.profit < 0).reduce((sum, t) => sum + t.profit, 0));
+    profitFactor = grossLoss > 0 ? grossProfit / grossLoss : Infinity;
+    
+    // Sharpe ratio (annualized)
+    const returnMean = returns.reduce((a, b) => a + b, 0) / returns.length || 0;
+    const returnStdDev = Math.sqrt(returns.map(r => Math.pow(r - returnMean, 2)).reduce((a, b) => a + b, 0) / returns.length) || 0;
+    sharpeRatio = returnStdDev > 0 ? (returnMean / returnStdDev) * Math.sqrt(252) : 0;
+    
+    // Win rates by trade type
+    const longWinRate = longTrades ? (winLong / longTrades) * 100 : 0;
+    const shortWinRate = shortTrades ? (winShort / shortTrades) * 100 : 0;
+    
+    this.metrics = { 
+      total, 
+      win, 
+      loss, 
+      winRate, 
+      pnl, 
+      avgPnL, 
+      maxDrawdown: maxDrawdown * 100,
+      maxTradeDrawdown: maxDrawdownTrade * 100,
+      maxRunup: maxRunup * 100,
+      longTrades,
+      shortTrades,
+      longWinRate,
+      shortWinRate,
+      profitFactor,
+      sharpeRatio,
+      consecutiveLosses,
+      trades 
+    };
+    
+    return this.metrics;
+  }
+}
+
+// ========== SIGNAL JOB ==========
+class SignalJob {
+  constructor() {
+    this.lastSignal = null;
+    this.lastAshrafSignal = null;
+    this.lastCombinedSignal = null;
+    this.tradeCount = 0;
+    this.lastTradeDay = null;
+    this.run();
+    cron.schedule('*/5 * * * *', this.run.bind(this));
+  }
+  
+  resetTradeCount() {
+    const today = new Date().toISOString().split('T')[0];
+    if (this.lastTradeDay !== today) {
+      this.lastTradeDay = today;
+      this.tradeCount = 0;
+    }
+  }
+  
+  async run() {
+    this.resetTradeCount();
+    if (this.tradeCount >= MAX_TRADES_PER_DAY) return;
+    
+    // Skip if not in trading session
+    if (!SessionUtils.isTradingSession()) {
+      console.log('Outside optimal trading hours');
+      return;
+    }
+    
+    try {
+      const now = new Date();
+      const from = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      const to = now.toISOString();
+      
+      // Fetch multi-TF data
+      const tfData = {};
+      tfData['D1'] = await DataService.getHistorical(SYMBOL, from, to, '1day');
+      tfData['H4'] = await DataService.getHistorical(SYMBOL, from, to, '4hour');
+      tfData['H1'] = await DataService.getHistorical(SYMBOL, from, to, '1hour');
+      tfData['M15'] = await DataService.getHistorical(SYMBOL, from, to, '15min');
+      tfData['5M'] = await DataService.getHistorical(SYMBOL, from, to, '5min');
+      
+      // Find zones
+      const tfZones = ZoneUtil.multiTFZones(tfData);
+      
+      // Get 1min data for signal
+      const data = await DataService.getHistorical(
+        SYMBOL, 
+        new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(), 
+        to, 
+        '1min'
+      );
+      
+      if (!data || data.length < 60) return;
+      
+      // Pro multi-TF strategy
+      const strat = new ProMultiTFStrategy(data, tfZones);
+      const analysis = strat.analyze();
+      const signal = strat.generateSignal(analysis);
+      
+      // Combine signals for higher confidence
+      let combinedSignal = { signal: 'HOLD', confidence: 'LOW' };
+      
+      // High confidence when both agree
+      if (
+        (signal.signal.startsWith('BUY')) ||
+        (signal.signal.startsWith('SELL'))
+      ) {
+        combinedSignal = {
+          signal: signal.signal.startsWith('BUY') ? 'BUY_CONFIRMED' : 'SELL_CONFIRMED',
+          reason: `Combined signal: ${signal.reason}}`,
+          confidence: 'HIGH',
+          proSignal: signal,
+        };
+      }
+      // Medium confidence when one strategy confirms and the other doesn't contradict
+      else if (
+        (signal.signal.startsWith('BUY')) ||
+        (signal.signal.startsWith('SELL'))
+      ) {
+        combinedSignal = {
+          signal: signal.signal.startsWith('BUY') ? 'BUY_PARTIAL' : 'SELL_PARTIAL',
+          reason: `Partial confirmation: ${signal.reason}`,
+          confidence: 'MEDIUM',
+          proSignal: signal,
+        };
+      }
+      
+      this.lastCombinedSignal = combinedSignal;
+      
+      if (signal.signal !== 'HOLD' && signal.signal !== 'MAX_TRADES_REACHED') {
+        this.tradeCount++;
+      }
+      
+      this.lastSignal = { ...signal, time: now, tfZones };
+      
+      console.log('Multi-TF Signal:', this.lastSignal);
+      console.log('Combined Signal:', this.lastCombinedSignal);
+      
+      // Log high-confidence trades
+      if (combinedSignal.confidence === 'HIGH') {
+        TradeLogger.logTrade({
+          signal: combinedSignal.signal,
+          reason: combinedSignal.reason,
+          confidence: combinedSignal.confidence,
+          time: now,
+          price: data[data.length - 1].c
+        });
+      }
+    } catch (e) {
+      console.error('Signal job error:', e.message);
+    }
+  }
+  
+  getLastSignal() { return this.lastSignal; }
+  getLastCombinedSignal() { return this.lastCombinedSignal; }
+}
+
+// ========== ENHANCED SIGNAL JOB ==========
+// Replace your existing SignalJob class run method with this enhanced version
+class EnhancedSignalJob extends SignalJob {
+  async run() {
+    this.resetTradeCount();
+    if (this.tradeCount >= MAX_TRADES_PER_DAY) return;
+    
+    // Skip if not in trading session
+    if (!SessionUtils.isTradingSession()) {
+      console.log('Outside optimal trading hours');
+      return;
+    }
+    
+    try {
+      const now = new Date();
+      const from = new Date(now.getTime() - 3 * 24 * 60 * 60 * 1000).toISOString();
+      const to = now.toISOString();
+      
+      // Fetch multi-TF data
+      const tfData = {};
+      tfData['D1'] = await DataService.getHistorical(SYMBOL, from, to, '1day');
+      tfData['H4'] = await DataService.getHistorical(SYMBOL, from, to, '4hour');
+      tfData['H1'] = await DataService.getHistorical(SYMBOL, from, to, '1hour');
+      tfData['M15'] = await DataService.getHistorical(SYMBOL, from, to, '15min');
+      tfData['5M'] = await DataService.getHistorical(SYMBOL, from, to, '5min');
+      
+      // Find zones
+      const tfZones = ZoneUtil.multiTFZones(tfData);
+      
+      // Get 1min data for signal
+      const data = await DataService.getHistorical(
+        SYMBOL, 
+        new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString(), 
+        to, 
+        '1min'
+      );
+      
+      if (!data || data.length < 60) return;
+      
+      // Use enhanced strategy
+      const strat = new EnhancedProStrategy(data, tfZones);
+      const analysis = strat.analyze();
+      const signal = strat.generateSignal(analysis);
+      
+      // Enhanced signal processing
+      let combinedSignal = { signal: 'HOLD', confidence: 'LOW' };
+      
+      // Very high confidence when multiple professional strategies agree
+      if (signal.confidence === 'VERY_HIGH') {
+        combinedSignal = {
+          signal: signal.signal,
+          reason: `CONFLUENCE: ${signal.reason}`,
+          confidence: 'VERY_HIGH',
+          strategies: signal.strategies,
+          entry: signal.entry,
+          stop: signal.stop,
+          target: signal.target
+        };
+      }
+      // High confidence when single professional strategy confirms
+      else if (signal.confidence === 'HIGH') {
+        combinedSignal = {
+          signal: signal.signal,
+          reason: `PROFESSIONAL: ${signal.reason}`,
+          confidence: 'HIGH',
+          entry: signal.entry,
+          stop: signal.stop,
+          target: signal.target
+        };
+      }
+      // Medium confidence for original signals
+      else if (signal.signal !== 'HOLD' && signal.signal !== 'MAX_TRADES_REACHED') {
+        combinedSignal = {
+          signal: signal.signal,
+          reason: `ORIGINAL: ${signal.reason || 'Technical analysis'}`,
+          confidence: 'MEDIUM',
+          professionalSignalsCount: signal.professionalSignalsCount || 0
+        };
+      }
+      
+      this.lastCombinedSignal = combinedSignal;
+      
+      if (signal.signal !== 'HOLD' && signal.signal !== 'MAX_TRADES_REACHED') {
+        this.tradeCount++;
+      }
+      
+      this.lastSignal = { 
+        ...signal, 
+        time: now, 
+        tfZones,
+        allProfessionalSignals: signal.allSignals
+      };
+      
+      console.log('Enhanced Multi-TF Signal:', this.lastSignal);
+      console.log('Combined Signal:', this.lastCombinedSignal);
+      
+      // Log very high-confidence trades
+      if (combinedSignal.confidence === 'VERY_HIGH') {
+        TradeLogger.logTrade({
+          signal: combinedSignal.signal,
+          reason: combinedSignal.reason,
+          confidence: combinedSignal.confidence,
+          strategies: combinedSignal.strategies,
+          time: now,
+          price: data[data.length - 1].c,
+          entry: combinedSignal.entry,
+          stop: combinedSignal.stop,
+          target: combinedSignal.target
+        });
+      }
+    } catch (e) {
+      console.error('Enhanced signal job error:', e.message);
+    }
+  }
+}
+
+// ========== EXPRESS API ==========
+const app = express();
+// const signalJob = new SignalJob();
+const signalJob = new EnhancedSignalJob();
+
+app.get('/api/signal', (req, res) => {
+  res.json(signalJob.getLastSignal());
+});
+
+app.get('/api/ashraf', (req, res) => {
+  res.json(signalJob.getLastAshrafSignal());
+});
+
+app.get('/api/combined', (req, res) => {
+  res.json(signalJob.getLastCombinedSignal());
+});
+
+app.get('/api/journal', (req, res) => {
+  res.json(TradeLogger.getJournal());
+});
+
+app.get('/api/backtest', async (req, res) => {
+  try {
+    const { symbol, from, to, interval, strategy } = req.query;
+    const symbolToUse = symbol || SYMBOL;
+    const intervalToUse = interval || '1min';
+    
+    // Multi-TF zones for pro strategy
+    const tfData = {};
+    tfData['D1'] = await DataService.getHistorical(symbolToUse, from, to, '1day');
+    tfData['H4'] = await DataService.getHistorical(symbolToUse, from, to, '4hour');
+    tfData['H1'] = await DataService.getHistorical(symbolToUse, from, to, '1hour');
+    tfData['M15'] = await DataService.getHistorical(symbolToUse, from, to, '15min');
+    tfData['M5'] = await DataService.getHistorical(symbolToUse, from, to, '5min');
+
+    const tfZones = ZoneUtil.multiTFZones(tfData);
+    
+    // Main data
+    const data = await DataService.getHistorical(symbolToUse, from, to, intervalToUse);
+    
+    if (!data || data.length < 100) {
+      return res.status(400).json({ error: 'Not enough data' });
+    }
+    
+    let results;
+      const backtester = new Backtester(data, ProMultiTFStrategy, tfZones);
+      results = await backtester.run();
+    
+    res.json(results);
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Add new API endpoint to your Express app:
+app.get('/api/professional-signals', (req, res) => {
+  const lastSignal = signalJob.getLastSignal();
+  if (lastSignal && lastSignal.allProfessionalSignals) {
+    res.json({
+      timestamp: lastSignal.time,
+      currentPrice: lastSignal.allProfessionalSignals ? 
+        lastSignal.allProfessionalSignals.breakout?.entry : 'N/A',
+      signals: lastSignal.allProfessionalSignals,
+      combinedSignal: signalJob.getLastCombinedSignal(),
+      confidence: lastSignal.confidence
+    });
+  } else {
+    res.json({ error: 'No professional signals available' });
+  }
+});
+
+// Add strategy performance endpoint:
+app.get('/api/strategy-performance', (req, res) => {
+  const journal = TradeLogger.getJournal();
+  const performance = {
+    total: journal.length,
+    byStrategy: {},
+    byConfidence: { HIGH: 0, MEDIUM: 0, LOW: 0, VERY_HIGH: 0 },
+    winRate: 0,
+    profitFactor: 0
+  };
+  
+  journal.forEach(trade => {
+    // Count by confidence
+    if (trade.confidence) {
+      performance.byConfidence[trade.confidence]++;
+    }
+    
+    // Count by strategy type
+    if (trade.signal) {
+      const strategyType = trade.signal.split('_')[1] || 'UNKNOWN';
+      performance.byStrategy[strategyType] = (performance.byStrategy[strategyType] || 0) + 1;
+    }
+  });
+  
+  res.json(performance);
+});
+
+app.listen(PORT, () => {
+  console.log(`Professional Trading System running on port ${PORT}`);
+});
