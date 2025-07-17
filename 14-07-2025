@@ -1,56 +1,25 @@
-require("dotenv").config();
 const express = require("express");
 const axios = require("axios");
-const {
-  EMA,
-  RSI,
-  BollingerBands,
-  MACD,
-  Stochastic,
-  PSAR,
-  ATR,
-  WilliamsR,
-  SMA,
-  VWAP,
-  OBV,
-  ADX,
-  MFI,
-  ROC,
-  FibonacciRetracement,
-} = require("technicalindicators");
+const { EMA, RSI, Stochastic, ATR, OBV } = require("technicalindicators");
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 const FINAGE_API_KEY = "API_KEY9fUKN2EL3S6FOZ02YR4CE020WRCCPG7I";
 
 class ForexAnalyzer {
   constructor() {
     this.strategies = {
-      emaCrossoverRSI: this.emaCrossoverRSI,
-      bollingerBands: this.bollingerBands,
-      macdTrend: this.macdTrend,
-      parabolicSAR: this.parabolicSAR,
-      stochasticOscillator: this.stochasticOscillator,
-      alligatorEMA: this.alligatorEMA,
       supportResistance: this.supportResistance,
-      engulfingDoji: this.engulfingDoji,
       fibonacciPullback: this.fibonacciPullback,
-      fractalReversal: this.fractalReversal,
       supertrend: this.supertrend,
-      volumeSpike: this.volumeSpike,
       orderBlockRetest: this.orderBlockRetest,
-      doubleTopBottom: this.doubleTopBottom,
-      channelBreakout: this.channelBreakout,
-      coppockCurve: this.coppockCurve,
-      zigzagMACDStochastic: this.zigzagMACDStochastic,
-      tripleMAFractal: this.tripleMAFractal,
-      rsiDivergence: this.rsiDivergence,
-      volumeFilter: this.volumeFilter,
-      atrBreakout: this.atrBreakout,
-      williamsR: this.williamsR,
-      vwapReversal: this.vwapReversal,
-      srFlip: this.srFlip,
       patternCompletion: this.patternCompletion,
+      rsiDivergence: this.rsiDivergence,
+      emaCrossoverRSI: this.emaCrossoverRSI,
+      stochasticOscillator: this.stochasticOscillator,
+      obvStrategy: this.obvStrategy,
+      volumeSpikeReversal: this.volumeSpikeReversal,
+      averageSessionVolatility: this.averageSessionVolatility,
     };
   }
 
@@ -58,7 +27,6 @@ class ForexAnalyzer {
     const toDate = new Date();
     const fromDate = new Date();
 
-    // Interval config: [days_needed, api_format]
     const intervalConfig = {
       "1min": [1, "1/minute"],
       "2min": [1, "2/minute"],
@@ -66,12 +34,6 @@ class ForexAnalyzer {
       "5min": [2, "5/minute"],
       "15min": [3, "15/minute"],
       "30min": [5, "30/minute"],
-      "45min": [5, "45/minute"],
-      "1h": [5, "1/hour"],
-      "2h": [9, "2/hour"],
-      "4h": [17, "4/hour"],
-      "8h": [34, "8/hour"],
-      "1day": [100, "1/day"],
     };
 
     const [daysNeeded, apiInterval] = intervalConfig[interval] || [30, "1/day"];
@@ -85,6 +47,7 @@ class ForexAnalyzer {
     try {
       console.log("url", url);
       const response = await axios.get(url);
+
       return (
         response.data.results?.map((r) => ({
           open: r.o,
@@ -101,111 +64,392 @@ class ForexAnalyzer {
     }
   }
 
-  // Strategy Implementations
-  emaCrossoverRSI(data) {
-    const closes = data.map((d) => d.close);
-    const ema9 = EMA.calculate({ period: 9, values: closes });
-    const ema21 = EMA.calculate({ period: 21, values: closes });
-    const rsi = RSI.calculate({ period: 14, values: closes });
+  averageSessionVolatility(data, sessionMinutes = 60, lookbackSessions = 5) {
+    if (data.length < sessionMinutes * (lookbackSessions + 1)) return "hold";
+    // Find most recent session's bars
+    const lastSession = data.slice(-sessionMinutes);
 
-    const lastIdx = data.length - 1;
-    const prevIdx = lastIdx - 1;
+    // Calculate high-low range for the most recent session
+    const sessionHigh = Math.max(...lastSession.map((d) => d.high));
+    const sessionLow = Math.min(...lastSession.map((d) => d.low));
+    const lastSessionRange = sessionHigh - sessionLow;
 
-    if (lastIdx < 21 || !ema9[lastIdx] || !ema21[lastIdx] || !rsi[lastIdx])
+    // Calculate average range for previous sessions
+    let ranges = [];
+    for (let i = 1; i <= lookbackSessions; i++) {
+      const session = data.slice(
+        -sessionMinutes * (i + 1),
+        -sessionMinutes * i
+      );
+      if (session.length === 0) continue;
+      const high = Math.max(...session.map((d) => d.high));
+      const low = Math.min(...session.map((d) => d.low));
+      ranges.push(high - low);
+    }
+    if (ranges.length < lookbackSessions) return "hold";
+
+    const avgRange = ranges.reduce((a, b) => a + b, 0) / ranges.length;
+
+    // Trading logic based on volatility expansion/contraction
+    // **High volatility breakout signal**
+    if (lastSessionRange > 1.3 * avgRange) {
+      // If price is also breaking out upward in last few bars
+      if (lastSession[lastSession.length - 1].close > sessionHigh * 0.98)
+        return "buy";
+      if (lastSession[lastSession.length - 1].close < sessionLow * 1.02)
+        return "sell";
+    }
+
+    // **Volatility contraction (range is much tighter than average) - prepare for breakout soon**
+    if (lastSessionRange < 0.7 * avgRange) {
       return "hold";
+    }
 
-    const emaCrossUp =
-      ema9[prevIdx] <= ema21[prevIdx] && ema9[lastIdx] > ema21[lastIdx];
-    const emaCrossDown =
-      ema9[prevIdx] >= ema21[prevIdx] && ema9[lastIdx] < ema21[lastIdx];
-
-    if (emaCrossUp && rsi[lastIdx] < 30) return "buy";
-    if (emaCrossDown && rsi[lastIdx] > 70) return "sell";
     return "hold";
   }
 
-  bollingerBands(data) {
-    const closes = data.map((d) => d.close);
-    const bb = BollingerBands.calculate({
-      period: 20,
-      stdDev: 2,
-      values: closes,
-    });
-
-    const lastIdx = data.length - 1;
-    if (lastIdx < 20 || !bb[lastIdx]) return "hold";
-
-    const price = data[lastIdx].close;
-    return price < bb[lastIdx].lower
-      ? "buy"
-      : price > bb[lastIdx].upper
-      ? "sell"
-      : "hold";
+  volumeSpikeReversal(data) {
+    if (data.length < 6) return "hold";
+    const vols = data.slice(-6).map((d) => d.volume);
+    const avgVol = vols.slice(0, 5).reduce((a, b) => a + b, 0) / 5;
+    const last = data[data.length - 1];
+    if (last.volume > avgVol * 2) {
+      const body = Math.abs(last.close - last.open);
+      const total = last.high - last.low;
+      const ratio = body / total;
+      // Bullish spike reversal
+      if (
+        ratio < 0.3 &&
+        last.close > (last.high + last.low) / 2 &&
+        last.close > last.open
+      )
+        return "buy";
+      // Bearish spike reversal
+      if (
+        ratio < 0.3 &&
+        last.close < (last.high + last.low) / 2 &&
+        last.close < last.open
+      )
+        return "sell";
+    }
+    return "hold";
   }
 
-  macdTrend(data) {
+  obvStrategy(data) {
     const closes = data.map((d) => d.close);
-    const macd = MACD.calculate({
-      fastPeriod: 12,
-      slowPeriod: 26,
-      signalPeriod: 9,
-      values: closes,
-      SimpleMAOscillator: false,
-      SimpleMASignal: false,
-    });
-
-    const lastIdx = data.length - 1;
-    if (lastIdx < 26 || !macd[lastIdx]) return "hold";
-
-    const prevIdx = lastIdx - 1;
-    const macdCrossUp =
-      macd[prevIdx].MACD <= macd[prevIdx].signal &&
-      macd[lastIdx].MACD > macd[lastIdx].signal;
-    const macdCrossDown =
-      macd[prevIdx].MACD >= macd[prevIdx].signal &&
-      macd[lastIdx].MACD < macd[lastIdx].signal;
-
-    return macdCrossUp ? "buy" : macdCrossDown ? "sell" : "hold";
+    const volumes = data.map((d) => d.volume);
+    const obv = OBV.calculate({ close: closes, volume: volumes });
+    if (obv.length < 2) return "hold";
+    const lastObv = obv[obv.length - 1];
+    const prevObv = obv[obv.length - 2];
+    if (
+      lastObv > prevObv &&
+      closes[closes.length - 1] > closes[closes.length - 2]
+    )
+      return "buy";
+    if (
+      lastObv < prevObv &&
+      closes[closes.length - 1] < closes[closes.length - 2]
+    )
+      return "sell";
+    return "hold";
   }
 
-  parabolicSAR(data) {
+  // OPTIMIZED STRATEGIES FOR 1-3 MINUTE TRADING
+  supportResistance(data) {
+    const lookback = 3; // Reduced from 5
+    const swingPoints = this.findSwingPoints(data, lookback);
+    if (!swingPoints.length) return "hold";
+
+    const last = data[data.length - 1];
+    const tolerance = 0.0005; // Tighter tolerance (0.05%)
+
+    // Support levels (last 3 lows)
+    const supportLevels = swingPoints
+      .filter((p) => p.type === "low")
+      .slice(-3)
+      .map((p) => p.price);
+
+    // Resistance levels (last 3 highs)
+    const resistanceLevels = swingPoints
+      .filter((p) => p.type === "high")
+      .slice(-3)
+      .map((p) => p.price);
+
+    // Check support bounce with volume confirmation
+    const nearSupport = supportLevels.some(
+      (level) => Math.abs(last.low - level) / level < tolerance
+    );
+
+    // Check resistance rejection with volume confirmation
+    const nearResistance = resistanceLevels.some(
+      (level) => Math.abs(last.high - level) / level < tolerance
+    );
+
+    // Immediate price action confirmation
+    if (
+      nearSupport &&
+      last.close > last.open &&
+      last.volume > data[data.length - 2].volume
+    )
+      return "buy";
+
+    if (
+      nearResistance &&
+      last.close < last.open &&
+      last.volume > data[data.length - 2].volume
+    )
+      return "sell";
+
+    return "hold";
+  }
+
+  fibonacciPullback(data) {
+    const swingPoints = this.findSwingPoints(data, 3); // Reduced lookback
+    if (swingPoints.length < 2) return "hold";
+
+    // Last significant swing high and low
+    const highs = swingPoints.filter((p) => p.type === "high").slice(-2);
+    const lows = swingPoints.filter((p) => p.type === "low").slice(-2);
+
+    if (highs.length < 1 || lows.length < 1) return "hold";
+
+    const lastHigh = Math.max(...highs.map((h) => h.price));
+    const lastLow = Math.min(...lows.map((l) => l.price));
+    const range = lastHigh - lastLow;
+
+    // Key Fibonacci levels for short-term trading
+    const fibLevels = {
+      level38: lastHigh - range * 0.382,
+      level50: lastHigh - range * 0.5,
+      level61: lastHigh - range * 0.618,
+    };
+
+    const last = data[data.length - 1];
+    const tolerance = 0.0005; // Tighter tolerance (0.05%)
+
+    // Check if price is near a fib level with confirmation
+    for (const level of Object.values(fibLevels)) {
+      if (Math.abs(last.close - level) / level < tolerance) {
+        // Bullish reversal confirmation
+        if (last.close > last.open && last.close > (last.high + last.low) / 2)
+          return "buy";
+
+        // Bearish reversal confirmation
+        if (last.close < last.open && last.close < (last.high + last.low) / 2)
+          return "sell";
+      }
+    }
+
+    return "hold";
+  }
+
+  supertrend(data) {
+    // Optimized for short-term: smaller periods
+    const period = 5; // Reduced from 10
+    const multiplier = 2.0; // More sensitive
+
+    if (data.length < period) return "hold";
+
     const highs = data.map((d) => d.high);
     const lows = data.map((d) => d.low);
-    const psar = PSAR.calculate({
+    const closes = data.map((d) => d.close);
+
+    // Calculate ATR
+    const atr = ATR.calculate({
+      period,
       high: highs,
       low: lows,
-      step: 0.02,
-      max: 0.2,
+      close: closes,
     });
 
+    if (atr.length < 1) return "hold";
+
     const lastIdx = data.length - 1;
-    if (lastIdx < 2 || !psar[lastIdx]) return "hold";
+    const lastAtr = atr[atr.length - 1];
+    const prevClose = data[lastIdx - 1].close;
 
+    // Calculate basic bands
+    const mid = (highs[lastIdx] + lows[lastIdx]) / 2;
+    const upper = mid + multiplier * lastAtr;
+    const lower = mid - multiplier * lastAtr;
+
+    // Determine trend with immediate confirmation
+    if (closes[lastIdx] > upper && closes[lastIdx] > prevClose) return "buy";
+
+    if (closes[lastIdx] < lower && closes[lastIdx] < prevClose) return "sell";
+
+    return "hold";
+  }
+
+  findConsolidationZones(data, minPeriod) {
+    const zones = [];
+    let startIdx = 0;
+
+    for (let i = 1; i < data.length; i++) {
+      const range =
+        Math.max(data[i].high, data[i - 1].high) -
+        Math.min(data[i].low, data[i - 1].low);
+      const avgRange =
+        (data[i].high - data[i].low + data[i - 1].high - data[i - 1].low) / 2;
+
+      // Consolidation if range is less than 1.5x average range
+      if (range < avgRange * 1.5) {
+        if (startIdx === 0) startIdx = i - 1;
+      } else {
+        if (startIdx > 0 && i - startIdx >= minPeriod) {
+          const zoneHigh = Math.max(
+            ...data.slice(startIdx, i).map((d) => d.high)
+          );
+          const zoneLow = Math.min(
+            ...data.slice(startIdx, i).map((d) => d.low)
+          );
+          zones.push({
+            start: startIdx,
+            end: i - 1,
+            high: zoneHigh,
+            low: zoneLow,
+            mid: (zoneHigh + zoneLow) / 2,
+          });
+        }
+        startIdx = 0;
+      }
+    }
+    return zones;
+  }
+
+  orderBlockRetest(data) {
+    // More sensitive consolidation detection
+    const blocks = this.findConsolidationZones(data, 2); // Reduced min period
+    if (!blocks.length) return "hold";
+
+    const last = data[data.length - 1];
+    const prev = data[data.length - 2];
+
+    // Only check recent blocks (last 2)
+    for (const block of blocks.slice(-2)) {
+      const inBlock = last.low <= block.high && last.high >= block.low;
+
+      if (!inBlock) continue;
+
+      // Bullish retest confirmation
+      if (last.close > block.mid && last.close > prev.close) return "buy";
+
+      // Bearish retest confirmation
+      if (last.close < block.mid && last.close < prev.close) return "sell";
+    }
+
+    return "hold";
+  }
+
+  patternCompletion(data) {
+    // Focus on short-term patterns only
+    if (data.length < 5) return "hold";
+
+    // 1. Pin Bar detection
+    const last = data[data.length - 1];
+    const bodySize = Math.abs(last.open - last.close);
+    const totalRange = last.high - last.low;
+    const bodyRatio = bodySize / totalRange;
+
+    // Bullish pin bar
+    if (bodyRatio < 0.3 && last.close > (last.high + last.low) / 2)
+      return "buy";
+
+    // Bearish pin bar
+    if (bodyRatio < 0.3 && last.close < (last.high + last.low) / 2)
+      return "sell";
+
+    // 2. Inside Bar detection
+    const prev = data[data.length - 2];
+    if (last.high < prev.high && last.low > prev.low) {
+      // Breakout confirmation
+      if (last.close > prev.high) return "buy";
+      if (last.close < prev.low) return "sell";
+    }
+
+    return "hold";
+  }
+
+  rsiDivergence(data) {
+    const closes = data.map((d) => d.close);
+
+    // Shorter period for faster response
+    const rsi = RSI.calculate({ period: 10, values: closes }); // Reduced from 14
+
+    if (rsi.length < 10) return "hold";
+
+    // Only check last 2 peaks/valleys
+    const priceValleys = this.findValleys(closes, 2);
+    const rsiValleys = this.findValleys(rsi, 2);
+    const pricePeaks = this.findPeaks(closes, 2);
+    const rsiPeaks = this.findPeaks(rsi, 2);
+
+    // Bullish divergence
+    if (priceValleys.length >= 2 && rsiValleys.length >= 2) {
+      const lastPrice = priceValleys[priceValleys.length - 1].value;
+      const prevPrice = priceValleys[priceValleys.length - 2].value;
+      const lastRsi = rsiValleys[rsiValleys.length - 1].value;
+      const prevRsi = rsiValleys[rsiValleys.length - 2].value;
+
+      if (lastPrice < prevPrice && lastRsi > prevRsi) return "buy";
+    }
+
+    // Bearish divergence
+    if (pricePeaks.length >= 2 && rsiPeaks.length >= 2) {
+      const lastPrice = pricePeaks[pricePeaks.length - 1].value;
+      const prevPrice = pricePeaks[pricePeaks.length - 2].value;
+      const lastRsi = rsiPeaks[rsiPeaks.length - 1].value;
+      const prevRsi = rsiPeaks[rsiPeaks.length - 2].value;
+
+      if (lastPrice > prevPrice && lastRsi < prevRsi) return "sell";
+    }
+
+    return "hold";
+  }
+
+  emaCrossoverRSI(data) {
+    const closes = data.map((d) => d.close);
+
+    // Faster EMAs
+    const ema5 = EMA.calculate({ period: 5, values: closes });
+    const ema10 = EMA.calculate({ period: 10, values: closes });
+    const rsi = RSI.calculate({ period: 8, values: closes }); // Faster RSI
+
+    const lastIdx = data.length - 1;
     const prevIdx = lastIdx - 1;
-    const flippedUp =
-      data[prevIdx].close <= psar[prevIdx] &&
-      data[lastIdx].close > psar[lastIdx];
-    const flippedDown =
-      data[prevIdx].close >= psar[prevIdx] &&
-      data[lastIdx].close < psar[lastIdx];
 
-    return flippedUp ? "buy" : flippedDown ? "sell" : "hold";
+    if (lastIdx < 10 || !ema5[lastIdx] || !ema10[lastIdx] || !rsi[lastIdx])
+      return "hold";
+
+    const emaCrossUp =
+      ema5[prevIdx] <= ema10[prevIdx] && ema5[lastIdx] > ema10[lastIdx];
+    const emaCrossDown =
+      ema5[prevIdx] >= ema10[prevIdx] && ema5[lastIdx] < ema10[lastIdx];
+
+    // More sensitive RSI thresholds
+    if (emaCrossUp && rsi[lastIdx] < 35) return "buy";
+    if (emaCrossDown && rsi[lastIdx] > 65) return "sell";
+
+    return "hold";
   }
 
   stochasticOscillator(data) {
     const closes = data.map((d) => d.close);
     const highs = data.map((d) => d.high);
     const lows = data.map((d) => d.low);
+
+    // Faster stochastic
     const sto = Stochastic.calculate({
       high: highs,
       low: lows,
       close: closes,
-      period: 14,
-      signalPeriod: 3,
+      period: 10, // Reduced from 14
+      signalPeriod: 2,
     });
 
     const lastIdx = data.length - 1;
-    if (lastIdx < 14 || !sto[lastIdx]) return "hold";
+    if (lastIdx < 10 || !sto[lastIdx]) return "hold";
 
     const k = sto[lastIdx].k;
     const d = sto[lastIdx].d;
@@ -215,638 +459,10 @@ class ForexAnalyzer {
     const kCrossUp = prevK < prevD && k > d;
     const kCrossDown = prevK > prevD && k < d;
 
-    return kCrossUp && k < 20 ? "buy" : kCrossDown && k > 80 ? "sell" : "hold";
+    // More sensitive thresholds
+    return kCrossUp && k < 25 ? "buy" : kCrossDown && k > 75 ? "sell" : "hold";
   }
 
-  alligatorEMA(data) {
-    const closes = data.map((d) => d.close);
-    const ema5 = EMA.calculate({ period: 5, values: closes });
-    const ema8 = EMA.calculate({ period: 8, values: closes });
-    const ema13 = EMA.calculate({ period: 13, values: closes });
-
-    const lastIdx = data.length - 1;
-    if (lastIdx < 13 || !ema5[lastIdx] || !ema8[lastIdx] || !ema13[lastIdx])
-      return "hold";
-
-    const uptrend =
-      ema5[lastIdx] > ema8[lastIdx] && ema8[lastIdx] > ema13[lastIdx];
-    const downtrend =
-      ema13[lastIdx] > ema8[lastIdx] && ema8[lastIdx] > ema5[lastIdx];
-
-    // Add MACD confirmation
-    const macd = MACD.calculate({
-      fastPeriod: 12,
-      slowPeriod: 26,
-      signalPeriod: 9,
-      values: closes,
-    });
-    const macdBullish = macd[lastIdx]?.histogram > 0;
-    const macdBearish = macd[lastIdx]?.histogram < 0;
-
-    return uptrend && macdBullish
-      ? "buy"
-      : downtrend && macdBearish
-      ? "sell"
-      : "hold";
-  }
-
-  supportResistance(data) {
-    // Identify recent swing highs and lows
-    const swingPoints = this.findSwingPoints(data, 5);
-    if (!swingPoints.length) return "hold";
-
-    const last = data[data.length - 1];
-    const tolerance = 0.001; // 0.1% tolerance
-
-    // Check support bounce
-    const supportLevels = swingPoints
-      .filter((p) => p.type === "low")
-      .map((p) => p.price);
-    const nearSupport = supportLevels.some(
-      (level) => Math.abs(last.low - level) / level < tolerance
-    );
-
-    // Check resistance bounce
-    const resistanceLevels = swingPoints
-      .filter((p) => p.type === "high")
-      .map((p) => p.price);
-    const nearResistance = resistanceLevels.some(
-      (level) => Math.abs(last.high - level) / level < tolerance
-    );
-
-    const bullishConfirmation =
-      last.close > last.open && last.close > (last.high + last.low) / 2;
-    const bearishConfirmation =
-      last.close < last.open && last.close < (last.high + last.low) / 2;
-
-    return nearSupport && bullishConfirmation
-      ? "buy"
-      : nearResistance && bearishConfirmation
-      ? "sell"
-      : "hold";
-  }
-
-  engulfingDoji(data) {
-    const last = data[data.length - 1];
-    const prev = data[data.length - 2];
-    if (!prev) return "hold";
-
-    // Bullish engulfing
-    const bullEngulf =
-      last.close > prev.open &&
-      last.open < prev.close &&
-      last.close > prev.open;
-
-    // Bearish engulfing
-    const bearEngulf =
-      last.close < prev.open &&
-      last.open > prev.close &&
-      last.close < prev.open;
-
-    // Doji detection
-    const bodySize = Math.abs(last.open - last.close);
-    const totalRange = last.high - last.low;
-    const doji = bodySize / totalRange < 0.1 && totalRange > 0;
-
-    // RSI for confirmation
-    const closes = data.map((d) => d.close);
-    const rsi = RSI.calculate({ period: 14, values: closes });
-    const lastRsi = rsi[rsi.length - 1];
-
-    if (bullEngulf && lastRsi < 30) return "buy";
-    if (bearEngulf && lastRsi > 70) return "sell";
-    if (doji && lastRsi < 30) return "buy";
-    if (doji && lastRsi > 70) return "sell";
-    return "hold";
-  }
-
-  fibonacciPullback(data) {
-    // Find significant swing high and low
-    const swingPoints = this.findSwingPoints(data, 10);
-    const highs = swingPoints
-      .filter((p) => p.type === "high")
-      .map((p) => p.price);
-    const lows = swingPoints
-      .filter((p) => p.type === "low")
-      .map((p) => p.price);
-
-    if (highs.length < 2 || lows.length < 2) return "hold";
-
-    const lastHigh = Math.max(...highs.slice(-2));
-    const lastLow = Math.min(...lows.slice(-2));
-    const range = lastHigh - lastLow;
-
-    const fibLevels = {
-      level38: lastHigh - range * 0.382,
-      level50: lastHigh - range * 0.5,
-      level61: lastHigh - range * 0.618,
-    };
-
-    const last = data[data.length - 1];
-    const tolerance = 0.001; // 0.1% tolerance
-
-    // Check if price is near a fib level
-    const nearFib = Object.values(fibLevels).some(
-      (level) => Math.abs(last.close - level) / level < tolerance
-    );
-
-    if (!nearFib) return "hold";
-
-    // Check for reversal confirmation
-    const prev = data[data.length - 2];
-    const reversalUp = last.close > last.open && last.close > prev.close;
-    const reversalDown = last.close < last.open && last.close < prev.close;
-
-    return reversalUp ? "buy" : reversalDown ? "sell" : "hold";
-  }
-
-  fractalReversal(data) {
-    // Fractal detection requires 5 candles
-    if (data.length < 5) return "hold";
-
-    const lastIdx = data.length - 1;
-    const patternLength = 5;
-    const patternStart = lastIdx - patternLength + 1;
-
-    // Bullish fractal: low with two higher lows on each side
-    let bullishFractal = true;
-    const centerLow = data[patternStart + 2].low;
-    for (let i = 0; i < patternLength; i++) {
-      if (i === 2) continue; // Skip center
-      if (data[patternStart + i].low < centerLow) {
-        bullishFractal = false;
-        break;
-      }
-    }
-
-    // Bearish fractal: high with two lower highs on each side
-    let bearishFractal = true;
-    const centerHigh = data[patternStart + 2].high;
-    for (let i = 0; i < patternLength; i++) {
-      if (i === 2) continue; // Skip center
-      if (data[patternStart + i].high > centerHigh) {
-        bearishFractal = false;
-        break;
-      }
-    }
-
-    // Trend filter using EMA
-    const closes = data.map((d) => d.close);
-    const ema50 = EMA.calculate({ period: 50, values: closes });
-    const uptrend = data[lastIdx].close > ema50[ema50.length - 1];
-    const downtrend = data[lastIdx].close < ema50[ema50.length - 1];
-
-    return bullishFractal && uptrend
-      ? "buy"
-      : bearishFractal && downtrend
-      ? "sell"
-      : "hold";
-  }
-
-  supertrend(data) {
-    const closes = data.map((d) => d.close);
-    const highs = data.map((d) => d.high);
-    const lows = data.map((d) => d.low);
-
-    const atr = ATR.calculate({
-      period: 10,
-      high: highs,
-      low: lows,
-      close: closes,
-    });
-    if (!atr.length) return "hold";
-
-    const lastIdx = data.length - 1;
-    const lastAtr = atr[atr.length - 1];
-
-    // Calculate basic upper/lower bands
-    const basicUpper = (highs[lastIdx] + lows[lastIdx]) / 2 + 3 * lastAtr;
-    const basicLower = (highs[lastIdx] + lows[lastIdx]) / 2 - 3 * lastAtr;
-
-    // Determine trend direction
-    const prevSupertrend = data[lastIdx - 1].supertrend || "below";
-    const currentSupertrend =
-      data[lastIdx].close > basicUpper
-        ? "above"
-        : data[lastIdx].close < basicLower
-        ? "below"
-        : prevSupertrend;
-
-    // Save for next calculation
-    data[lastIdx].supertrend = currentSupertrend;
-
-    return currentSupertrend === "above" ? "buy" : "sell";
-  }
-
-  volumeSpike(data) {
-    const volumes = data.map((d) => d.volume);
-    const lastIdx = data.length - 1;
-
-    if (lastIdx < 20) return "hold";
-
-    // Calculate 20-period average volume
-    const avgVolume =
-      volumes.slice(-20).reduce((sum, vol) => sum + vol, 0) / 20;
-    const currentVolume = data[lastIdx].volume;
-    const volumeRatio = currentVolume / avgVolume;
-
-    // Only consider significant spikes
-    if (volumeRatio < 1.5) return "hold";
-
-    // Check price action with volume spike
-    const priceChange = data[lastIdx].close - data[lastIdx - 1].close;
-    const priceChangePercent = Math.abs(priceChange) / data[lastIdx - 1].close;
-
-    // Significant price movement with volume spike
-    if (priceChangePercent > 0.005) {
-      return priceChange > 0 ? "buy" : "sell";
-    }
-    return "hold";
-  }
-
-  orderBlockRetest(data) {
-    // Identify consolidation zones (order blocks)
-    const blocks = this.findConsolidationZones(data, 5);
-    if (!blocks.length) return "hold";
-
-    const last = data[data.length - 1];
-    const prev = data[data.length - 2];
-
-    // Check if price is retesting a block
-    for (const block of blocks.slice(-3)) {
-      // Check last 3 blocks
-      if (last.low <= block.high && last.high >= block.low) {
-        // Bullish retest: price bounces off support
-        if (last.close > block.mid && last.close > prev.close) {
-          return "buy";
-        }
-        // Bearish retest: price rejects at resistance
-        if (last.close < block.mid && last.close < prev.close) {
-          return "sell";
-        }
-      }
-    }
-    return "hold";
-  }
-
-  doubleTopBottom(data) {
-    const swingPoints = this.findSwingPoints(data, 5);
-    const highs = swingPoints.filter((p) => p.type === "high");
-    const lows = swingPoints.filter((p) => p.type === "low");
-
-    // Need at least two comparable highs/lows
-    if (highs.length < 2 || lows.length < 2) return "hold";
-
-    const tolerance = 0.002; // 0.2% tolerance
-    const lastHigh = highs[highs.length - 1];
-    const prevHigh = highs[highs.length - 2];
-    const lastLow = lows[lows.length - 1];
-    const prevLow = lows[lows.length - 2];
-
-    // Double top pattern
-    if (
-      Math.abs(lastHigh.price - prevHigh.price) / prevHigh.price <
-      tolerance
-    ) {
-      // Neckline break
-      const neckline = Math.min(lastHigh.price, prevHigh.price) * 0.99;
-      if (data[data.length - 1].close < neckline) {
-        return "sell";
-      }
-    }
-
-    // Double bottom pattern
-    if (Math.abs(lastLow.price - prevLow.price) / prevLow.price < tolerance) {
-      // Neckline break
-      const neckline = Math.max(lastLow.price, prevLow.price) * 1.01;
-      if (data[data.length - 1].close > neckline) {
-        return "buy";
-      }
-    }
-
-    return "hold";
-  }
-
-  channelBreakout(data) {
-    // Identify channel using recent highs and lows
-    const period = 20;
-    if (data.length < period) return "hold";
-
-    const recentHighs = data.slice(-period).map((d) => d.high);
-    const recentLows = data.slice(-period).map((d) => d.low);
-    const channelHigh = Math.max(...recentHighs);
-    const channelLow = Math.min(...recentLows);
-
-    const last = data[data.length - 1];
-    const prev = data[data.length - 2];
-
-    // Breakout confirmation
-    const breakoutThreshold = 0.001; // 0.1% above/below channel
-
-    // Bullish breakout
-    if (
-      last.close > channelHigh * (1 + breakoutThreshold) &&
-      last.close > prev.close
-    ) {
-      return "buy";
-    }
-
-    // Bearish breakout
-    if (
-      last.close < channelLow * (1 - breakoutThreshold) &&
-      last.close < prev.close
-    ) {
-      return "sell";
-    }
-
-    return "hold";
-  }
-
-  coppockCurve(data) {
-    const closes = data.map((d) => d.close);
-
-    // Calculate ROC
-    const roc1 = ROC.calculate({ period: 10, values: closes });
-    const roc2 = ROC.calculate({ period: 14, values: closes });
-
-    if (!roc1.length || !roc2.length) return "hold";
-
-    // Calculate Coppock Curve as WMA of (ROC1 + ROC2)
-    const coppockInput = roc1.map((val, i) => val + (roc2[i] || 0));
-    const coppock = EMA.calculate({ period: 10, values: coppockInput });
-
-    const lastIdx = data.length - 1;
-    const prevIdx = lastIdx - 1;
-
-    if (!coppock[lastIdx] || !coppock[prevIdx]) return "hold";
-
-    // Buy when Coppock turns up from negative territory
-    if (coppock[prevIdx] < 0 && coppock[lastIdx] > coppock[prevIdx]) {
-      return "buy";
-    }
-
-    // Sell when Coppock turns down from positive territory
-    if (coppock[prevIdx] > 0 && coppock[lastIdx] < coppock[prevIdx]) {
-      return "sell";
-    }
-
-    return "hold";
-  }
-
-  zigzagMACDStochastic(data) {
-    // Simplified zigzag using swing points
-    const swingPoints = this.findSwingPoints(data, 3);
-    if (swingPoints.length < 2) return "hold";
-
-    const lastSwing = swingPoints[swingPoints.length - 1];
-    const direction = lastSwing.type === "high" ? "down" : "up";
-
-    // MACD
-    const closes = data.map((d) => d.close);
-    const macd = MACD.calculate({
-      fastPeriod: 12,
-      slowPeriod: 26,
-      signalPeriod: 9,
-      values: closes,
-    });
-    const lastMacd = macd[macd.length - 1];
-
-    // Stochastic
-    const highs = data.map((d) => d.high);
-    const lows = data.map((d) => d.low);
-    const sto = Stochastic.calculate({
-      high: highs,
-      low: lows,
-      close: closes,
-      period: 14,
-      signalPeriod: 3,
-    });
-    const lastSto = sto[sto.length - 1];
-
-    // Consensus
-    if (direction === "up") {
-      const macdBullish = lastMacd.histogram > 0;
-      const stoBullish =
-        lastSto.k < 20 || (lastSto.k > lastSto.d && lastSto.k < 50);
-      return macdBullish && stoBullish ? "buy" : "hold";
-    } else {
-      const macdBearish = lastMacd.histogram < 0;
-      const stoBearish =
-        lastSto.k > 80 || (lastSto.k < lastSto.d && lastSto.k > 50);
-      return macdBearish && stoBearish ? "sell" : "hold";
-    }
-  }
-
-  tripleMAFractal(data) {
-    // Triple EMA alignment
-    const closes = data.map((d) => d.close);
-    const ema5 = EMA.calculate({ period: 5, values: closes });
-    const ema13 = EMA.calculate({ period: 13, values: closes });
-    const ema34 = EMA.calculate({ period: 34, values: closes });
-
-    const lastIdx = data.length - 1;
-    if (lastIdx < 34) return "hold";
-
-    const alignedUp =
-      ema5[lastIdx] > ema13[lastIdx] && ema13[lastIdx] > ema34[lastIdx];
-    const alignedDown =
-      ema5[lastIdx] < ema13[lastIdx] && ema13[lastIdx] < ema34[lastIdx];
-
-    // Fractal confirmation
-    const fractalSignal = this.fractalReversal(data);
-
-    return alignedUp && fractalSignal === "buy"
-      ? "buy"
-      : alignedDown && fractalSignal === "sell"
-      ? "sell"
-      : "hold";
-  }
-
-  rsiDivergence(data) {
-    const closes = data.map((d) => d.close);
-    const rsi = RSI.calculate({ period: 14, values: closes });
-    if (rsi.length < 5) return "hold";
-
-    // Find price and RSI peaks/valleys
-    const priceValleys = this.findValleys(closes, 3);
-    const rsiValleys = this.findValleys(rsi, 3);
-    const pricePeaks = this.findPeaks(closes, 3);
-    const rsiPeaks = this.findPeaks(rsi, 3);
-
-    // Bullish divergence: lower price lows but higher RSI lows
-    if (priceValleys.length >= 2 && rsiValleys.length >= 2) {
-      const lastPriceValley = priceValleys[priceValleys.length - 1];
-      const prevPriceValley = priceValleys[priceValleys.length - 2];
-      const lastRsiValley = rsiValleys[rsiValleys.length - 1];
-      const prevRsiValley = rsiValleys[rsiValleys.length - 2];
-
-      if (
-        lastPriceValley.value < prevPriceValley.value &&
-        lastRsiValley.value > prevRsiValley.value
-      ) {
-        return "buy";
-      }
-    }
-
-    // Bearish divergence: higher price highs but lower RSI highs
-    if (pricePeaks.length >= 2 && rsiPeaks.length >= 2) {
-      const lastPricePeak = pricePeaks[pricePeaks.length - 1];
-      const prevPricePeak = pricePeaks[pricePeaks.length - 2];
-      const lastRsiPeak = rsiPeaks[rsiPeaks.length - 1];
-      const prevRsiPeak = rsiPeaks[rsiPeaks.length - 2];
-
-      if (
-        lastPricePeak.value > prevPricePeak.value &&
-        lastRsiPeak.value < prevRsiPeak.value
-      ) {
-        return "sell";
-      }
-    }
-
-    return "hold";
-  }
-
-  volumeFilter(data) {
-    // This is a meta-strategy that filters other signals
-    // Implemented in analyze() method
-    return "hold";
-  }
-
-  atrBreakout(data) {
-    const highs = data.map((d) => d.high);
-    const lows = data.map((d) => d.low);
-    const closes = data.map((d) => d.close);
-
-    const atr = ATR.calculate({
-      period: 14,
-      high: highs,
-      low: lows,
-      close: closes,
-    });
-    if (!atr.length) return "hold";
-
-    const lastIdx = data.length - 1;
-    const lastAtr = atr[atr.length - 1];
-    const prevClose = data[lastIdx - 1].close;
-
-    // Breakout if price moves more than ATR
-    if (data[lastIdx].close > prevClose + lastAtr) {
-      return "buy";
-    }
-    if (data[lastIdx].close < prevClose - lastAtr) {
-      return "sell";
-    }
-    return "hold";
-  }
-
-  williamsR(data) {
-    const closes = data.map((d) => d.close);
-    const highs = data.map((d) => d.high);
-    const lows = data.map((d) => d.low);
-
-    const williams = WilliamsR.calculate({
-      period: 14,
-      close: closes,
-      high: highs,
-      low: lows,
-    });
-    if (!williams.length) return "hold";
-
-    const lastIdx = data.length - 1;
-    const value = williams[williams.length - 1];
-    const prevValue = williams[williams.length - 2];
-
-    // Flip from oversold
-    if (prevValue < -80 && value > -80) {
-      return "buy";
-    }
-    // Flip from overbought
-    if (prevValue > -20 && value < -20) {
-      return "sell";
-    }
-    return "hold";
-  }
-
-  vwapReversal(data) {
-    // VWAP for forex - use typical price
-    const typicalPrices = data.map((d) => (d.high + d.low + d.close) / 3);
-    const volumes = data.map((d) => d.volume);
-    const vwap = VWAP.calculate({
-      high: typicalPrices,
-      low: typicalPrices,
-      close: typicalPrices,
-      volume: volumes,
-    });
-
-    const lastIdx = data.length - 1;
-    if (!vwap[lastIdx]) return "hold";
-
-    const lastVwap = vwap[lastIdx];
-    const lastClose = data[lastIdx].close;
-    const prevClose = data[lastIdx - 1].close;
-
-    // Bullish reversal: price reclaims VWAP from below
-    if (prevClose < lastVwap && lastClose > lastVwap) {
-      return "buy";
-    }
-    // Bearish reversal: price falls below VWAP from above
-    if (prevClose > lastVwap && lastClose < lastVwap) {
-      return "sell";
-    }
-    return "hold";
-  }
-
-  srFlip(data) {
-    // Identify recent S/R levels
-    const swingPoints = this.findSwingPoints(data, 5);
-    if (swingPoints.length < 2) return "hold";
-
-    const lastLevel = swingPoints[swingPoints.length - 1];
-    const lastClose = data[data.length - 1].close;
-
-    // Support becomes resistance
-    if (lastLevel.type === "low" && lastClose < lastLevel.price) {
-      // Price attempts to retest previous support as resistance
-      if (
-        lastClose > lastLevel.price * 0.99 &&
-        lastClose < lastLevel.price * 1.01
-      ) {
-        return "sell";
-      }
-    }
-    // Resistance becomes support
-    if (lastLevel.type === "high" && lastClose > lastLevel.price) {
-      // Price attempts to retest previous resistance as support
-      if (
-        lastClose > lastLevel.price * 0.99 &&
-        lastClose < lastLevel.price * 1.01
-      ) {
-        return "buy";
-      }
-    }
-    return "hold";
-  }
-
-  patternCompletion(data) {
-    // Simplified pattern detection
-    if (data.length < 5) return "hold";
-
-    // Head and Shoulders pattern detection
-    const headShoulders = this.detectHeadShoulders(data);
-    if (headShoulders === "bearish") return "sell";
-
-    // Inverse Head and Shoulders
-    if (headShoulders === "bullish") return "buy";
-
-    // Wedge detection
-    const wedge = this.detectWedge(data);
-    if (wedge === "rising") return "sell";
-    if (wedge === "falling") return "buy";
-
-    return "hold";
-  }
-
-  // Helper functions
   findSwingPoints(data, lookback) {
     const swingPoints = [];
     for (let i = lookback; i < data.length - lookback; i++) {
@@ -1038,66 +654,41 @@ class ForexAnalyzer {
     return slope;
   }
 
-  // Main analysis method
   async analyze(symbol, interval) {
     const data = await this.getForexData(symbol, interval);
-    if (!data || data.length < 100) {
+
+    // Reduced minimum data requirement
+    if (!data || data.length < 15) {
       throw new Error("Insufficient data for analysis");
     }
 
     const results = {};
     let buyCount = 0;
     let sellCount = 0;
-    let holdCount = 0;
 
-    // First pass: run all strategies except volume filter
+    // Run only our optimized strategies
     for (const [name, strategy] of Object.entries(this.strategies)) {
-      if (name === "volumeFilter") continue;
-
       try {
         results[name] = strategy.call(this, data);
         if (results[name] === "buy") buyCount++;
         if (results[name] === "sell") sellCount++;
-        if (results[name] === "hold") holdCount++;
       } catch (err) {
         console.error(`Error in ${name} strategy:`, err);
         results[name] = "error";
-        holdCount++;
       }
     }
 
-    // Apply volume filter (meta-strategy)
-    const volumeSignal = this.volumeFilter(data);
-    if (volumeSignal === "hold") {
-      // If volume is low, downgrade signals
-      for (const name in results) {
-        if (results[name] === "buy" || results[name] === "sell") {
-          results[name] = "hold";
-          buyCount = results[name] === "buy" ? buyCount - 1 : buyCount;
-          sellCount = results[name] === "sell" ? sellCount - 1 : sellCount;
-          holdCount++;
-        }
-      }
-    }
-
-    // Calculate consensus
-    const totalSignals = buyCount + sellCount + holdCount;
-    const buyRatio = buyCount / totalSignals;
-    const sellRatio = sellCount / totalSignals;
-
+    // Simple majority vote consensus
     let consensus = "hold";
-    if (buyRatio > 0.6) consensus = "strong buy";
-    else if (buyRatio > 0.4) consensus = "buy";
-    else if (sellRatio > 0.6) consensus = "strong sell";
-    else if (sellRatio > 0.4) consensus = "sell";
+    if (buyCount >= 3) consensus = "buy";
+    if (sellCount >= 3) consensus = "sell";
 
     return {
       symbol,
       interval,
       strategies: results,
       consensus,
-      counts: { buy: buyCount, sell: sellCount, hold: holdCount },
-      ratios: { buy: buyRatio, sell: sellRatio },
+      counts: { buy: buyCount, sell: sellCount },
     };
   }
 }
@@ -1112,6 +703,60 @@ app.get("/analyze/:symbol", async (req, res) => {
     res.json(analysis);
   } catch (error) {
     res.status(500).json({ error: error.message });
+  }
+});
+
+// Add this route after your existing routes
+app.get("/analyze-olym", async (req, res) => {
+  try {
+    const interval = req.query.interval || "5min";
+    const symbols = req.query.symbols
+      ? req.query.symbols.split(",")
+      : [
+          "USDJPY",
+          "USDCAD",
+          "AUDUSD",
+          "EURCAD",
+          "EURAUD",
+          "EURJPY",
+          "GBPJPY",
+          "AUDJPY",
+          "GBPCAD",
+          "GBPAUD",
+          "AUDCAD",
+          "CADJPY",
+        ];
+
+    const analyzer = new ForexAnalyzer();
+    const results = [];
+
+    for (const symbol of symbols) {
+      try {
+        const analysis = await analyzer.analyze(symbol, interval);
+        results.push({
+          pair: symbol,
+          consensus: analysis.consensus,
+          buySignals: analysis.counts.buy,
+          sellSignals: analysis.counts.sell,
+          totalStrategies: Object.keys(analysis.strategies).length,
+          details: analysis.strategies,
+        });
+      } catch (error) {
+        results.push({
+          pair: symbol,
+          error: error.message,
+        });
+      }
+    }
+
+    res.json({
+      interval,
+      analysisDate: new Date().toISOString(),
+      pairsAnalyzed: results.length,
+      results,
+    });
+  } catch (error) {
+    res.status(500).json({ error: "Server error: " + error.message });
   }
 });
 
